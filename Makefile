@@ -25,8 +25,17 @@
 # ----------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------
-DC_DEV  := docker compose -f docker-compose.dev.yml
-DC_PROD := docker compose -f docker-compose.prod.yml
+DOCKER  := $(shell command -v docker 2>/dev/null || command -v podman)
+DC_DEV  := $(DOCKER) compose -f docker-compose.dev.yml
+DC_PROD := $(DOCKER) compose -f docker-compose.prod.yml
+
+# podman-compose (used when only podman is installed) has no `cp`
+# subcommand, unlike `docker compose`. Container-to-host/host-to-
+# container copies go through the engine's own `cp` instead, which
+# both docker and podman support natively — but that needs the real
+# container name (container_name: in the compose files), not the
+# compose service name.
+DOCKER_CP := $(DOCKER) cp
 
 # Host-Ports (müssen mit den ${...:-default} Werten in den compose-
 # Dateien übereinstimmen, sonst zeigt `make urls` falsche Links).
@@ -234,7 +243,7 @@ keycloak-reset: ## ⚠️  Reset Keycloak (DROPS realm + users)
 	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
 		$(DC_DEV) stop keycloak keycloak-postgres; \
 		$(DC_DEV) rm -f keycloak keycloak-postgres; \
-		docker volume rm deployment_keycloak_postgres_data 2>/dev/null || true; \
+		$(DOCKER) volume rm deployment_keycloak_postgres_data 2>/dev/null || true; \
 		$(DC_DEV) up -d keycloak-postgres; \
 		sleep 5; \
 		$(DC_DEV) up -d keycloak; \
@@ -273,7 +282,7 @@ keycloak-wait: ## Block until Keycloak's HTTP listener answers (60s timeout)
 keycloak-export: ## Export the dhbw realm to keycloak/keycloak-export.json
 	@echo "Exporting Keycloak realm 'dhbw'..."
 	$(DC_DEV) exec keycloak /opt/keycloak/bin/kc.sh export --dir /tmp --realm dhbw
-	$(DC_DEV) cp keycloak:/tmp/dhbw-realm.json ./keycloak/keycloak-export.json
+	$(DOCKER_CP) keycloak-dev:/tmp/dhbw-realm.json ./keycloak/keycloak-export.json
 	@echo "✓ Realm exported → keycloak/keycloak-export.json"
 
 keycloak-disable-ssl: ## Allow plain-HTTP admin login on localhost (UPDATE realm SET ssl_required=NONE + restart)
@@ -317,9 +326,9 @@ keycloak-url: ## Print Keycloak URLs
 # Voraussetzung: ``make dev-up`` lief (Backend + Keycloak gesund).
 seed-data: ## Seed Keycloak users + DB (courses, apps, approvals)
 	@echo "📥 Kopiere Seed-Skript + Realm-Export in den Backend-Container..."
-	$(DC_DEV) cp ./seed/seed_data.py backend:/tmp/seed_data.py
-	$(DC_DEV) cp ./seed/app_descriptions backend:/tmp/app_descriptions
-	$(DC_DEV) cp ./keycloak/realm-export.json backend:/tmp/realm-export.json
+	$(DOCKER_CP) ./seed/seed_data.py backend-dev:/tmp/seed_data.py
+	$(DOCKER_CP) ./seed/app_descriptions backend-dev:/tmp/app_descriptions
+	$(DOCKER_CP) ./keycloak/realm-export.json backend-dev:/tmp/realm-export.json
 	@echo "🌱 Führe Seed aus..."
 	$(DC_DEV) exec -T \
 		-e KEYCLOAK_ADMIN_USER=$${KEYCLOAK_ADMIN_USER:-admin} \
@@ -395,7 +404,7 @@ status: ## Show container status (dev)
 # Monitoring
 # ----------------------------------------------------------------
 stats: ## docker stats (all containers)
-	docker stats
+	$(DOCKER) stats
 
 watch-dev: ## Watch dev container status every 2s
 	watch -n 2 '$(DC_DEV) ps'
@@ -415,7 +424,7 @@ clean-all: ## ⚠️  Wipe dev (DROPS ALL DATA)
 	@echo "✓ Complete cleanup done"
 
 prune: ## ⚠️  docker system prune -af --volumes (system-wide)
-	docker system prune -af --volumes
+	$(DOCKER) system prune -af --volumes
 	@echo "✓ Docker system pruned"
 
 # ----------------------------------------------------------------
@@ -471,7 +480,7 @@ prod-ps: ## List prod containers + health
 	$(DC_PROD) ps
 
 prod-migrate: ## Apply Alembic migrations against the running backend-prod container
-	docker exec backend-prod python -m alembic upgrade head
+	$(DOCKER) exec backend-prod python -m alembic upgrade head
 
 prod-seed: ## Seed Keycloak users + DB (kurse, apps, approvals) against the prod stack
 	@# Same shape as dev's seed-data: copy script + descriptions + realm
@@ -485,9 +494,9 @@ prod-seed: ## Seed Keycloak users + DB (kurse, apps, approvals) against the prod
 	@# auto-include .env), the docker compose exec runs with empty
 	@# admin creds, and the seed script hits Keycloak with a 401.
 	@echo "📥 Kopiere Seed-Skript + Realm-Export in den Backend-Container..."
-	$(DC_PROD) cp ./seed/seed_data.py backend:/tmp/seed_data.py
-	$(DC_PROD) cp ./seed/app_descriptions backend:/tmp/app_descriptions
-	$(DC_PROD) cp ./keycloak/realm-export.json backend:/tmp/realm-export.json
+	$(DOCKER_CP) ./seed/seed_data.py backend-prod:/tmp/seed_data.py
+	$(DOCKER_CP) ./seed/app_descriptions backend-prod:/tmp/app_descriptions
+	$(DOCKER_CP) ./keycloak/realm-export.json backend-prod:/tmp/realm-export.json
 	@echo "🌱 Führe Seed aus..."
 	@set -a; . ./.env; set +a; \
 	if [ -z "$$KEYCLOAK_ADMIN_USER" ] || [ -z "$$KEYCLOAK_ADMIN_PASSWORD" ]; then \
@@ -513,7 +522,7 @@ prod-set-keycloak-urls: ## Patch Keycloak client redirect/web-origin URLs to APP
 	if [ -z "$$KEYCLOAK_ADMIN_USER" ] || [ -z "$$KEYCLOAK_ADMIN_PASSWORD" ]; then \
 	  echo "❌ KEYCLOAK_ADMIN_USER / KEYCLOAK_ADMIN_PASSWORD fehlen in .env"; exit 1; \
 	fi; \
-	$(DC_PROD) cp ./seed/set_keycloak_urls.py backend:/tmp/set_keycloak_urls.py; \
+	$(DOCKER_CP) ./seed/set_keycloak_urls.py backend-prod:/tmp/set_keycloak_urls.py; \
 	$(DC_PROD) exec -T \
 	  -e KEYCLOAK_ADMIN_USER="$$KEYCLOAK_ADMIN_USER" \
 	  -e KEYCLOAK_ADMIN_PASSWORD="$$KEYCLOAK_ADMIN_PASSWORD" \
