@@ -221,7 +221,7 @@ services:
   # Do not re-introduce a migrate init-container here — that pattern
   # hides migration failures inside the compose output.
   backend:
-    image: ghcr.io/six7-click-n-deploy/backend:latest
+    image: ghcr.io/nextappstore/backend:latest
     pull_policy: always
     container_name: backend-prod
     # The backend image's venv is built at /build/.venv and copied to
@@ -323,7 +323,7 @@ services:
   # Worker has NO access to the application DB — it only talks to
   # RabbitMQ/Redis (Celery) and postgres-tfstate (Terraform state).
   worker:
-    image: ghcr.io/six7-click-n-deploy/worker:latest
+    image: ghcr.io/nextappstore/worker:latest
     pull_policy: always
     container_name: worker-prod
     environment:
@@ -417,7 +417,7 @@ services:
   # Always-latest from GHCR. Same ``pull_policy: always`` rationale as
   # backend / worker above.
   frontend:
-    image: ghcr.io/six7-click-n-deploy/frontend:latest
+    image: ghcr.io/nextappstore/frontend:latest
     pull_policy: always
     container_name: frontend-prod
     environment:

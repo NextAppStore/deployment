@@ -67,7 +67,7 @@ make --version
 sudo mkdir -p /opt/app-store
 sudo chown $USER:$USER /opt/app-store
 cd /opt/app-store
-git clone https://github.com/six7-click-n-deploy/deployment
+git clone https://github.com/NextAppStore/deployment
 cd deployment
 ```
 
@@ -190,6 +190,9 @@ VITE_API_URL=https://<VM-IP>/api
 VITE_KEYCLOAK_URL=https://<VM-IP>
 ```
 
+> [!TIP]
+> Wenn du eine Domain hast und Schritt 3 / Option A (ACME) nutzt, überall `<VM-IP>` durch `<TLS_DOMAIN>` ersetzen.
+
 ### 2j. `SMTP_*` (optional)
 
 E-Mail-Benachrichtigungen (Approval-Workflow). Wenn nicht gebraucht, einfach `SMTP_ENABLED=false` lassen und die anderen Felder leer. Für Gmail ein App-Password verwenden, nicht das Account-Passwort.
@@ -204,9 +207,35 @@ SMTP_FROM_EMAIL=
 SMTP_FROM_NAME=Click-n-Deploy
 ```
 
-## Schritt 3: Self-signed-Zertifikat erzeugen
+## Schritt 3: TLS-Zertifikat erzeugen
 
-In Dev terminiert das Frontend HTTP direkt; in Prod sitzt `nginx-prod` davor und erwartet zwei TLS-Dateien unter `nginx/certs/`. Generiere beides mit einem Make-Target:
+In Dev terminiert das Frontend HTTP direkt; in Prod sitzt `nginx-prod` davor und erwartet zwei TLS-Dateien unter `nginx/certs/`. Es gibt zwei Wege, diese Dateien zu erzeugen — wähle einen:
+
+### Option A: Echtes Zertifikat über den DHBW-ACME-Server (empfohlen, sobald eine Domain existiert)
+
+Voraussetzung ist eine DNS-Zone unter `*.users.dhbw.site` (z. B. `s242808-at-student-dhbw-mannheim-de.users.dhbw.site`) mit einem TSIG-Key für DNS-01-Updates — beides stellt DHBW im Self-Service-Portal bereit.
+
+In `.env` eintragen:
+
+```
+TLS_DOMAIN=s242808-at-student-dhbw-mannheim-de.users.dhbw.site
+ACME_ACCOUNT_EMAIL=s242808@student.dhbw-mannheim.de
+DNS_TSIG_KEY="key \"user-key-...\" { algorithm hmac-sha512; secret \"...\"; };"
+```
+
+`TLS_DOMAIN` ist die **nackte** Zone ohne `www.`-Präfix — Ansible/Make stellen automatisch ein Zertifikat für `TLS_DOMAIN` **und** `www.TLS_DOMAIN` aus; ein `www.` in `TLS_DOMAIN` selbst würde ein doppeltes `www.www....` erzeugen.
+
+`DNS_TSIG_KEY` ist der komplette `key { ... }`-Block aus dem DHBW-Portal, als **eine** Zeile in `.env` (Zeilenumbrüche im Original einfach durch Leerzeichen ersetzen — BIND-Syntax ist whitespace-tolerant). Wichtig: der ganze Wert muss in doppelte Anführungszeichen gefasst werden und jedes `"` darin mit `\"` escaped werden — sowohl `make prod-cert-acme` (sourced `.env` per Bash) als auch der Ansible-Task erwarten diese Schreibweise. Ein unescapter Wert mit rohen `"` und `{` bricht das Sourcing mit `syntax error near unexpected token`.
+
+```bash
+make prod-cert-acme
+```
+
+Das Target installiert `acme.sh` (idempotent), schreibt den TSIG-Key nach `~/.acme-dns/tsig.key`, registriert den ACME-Account und stellt ein Zertifikat für `TLS_DOMAIN` (+ die `www.`-Variante) per DNS-01 (`nsupdate` gegen `ns.cloud-ns.dhbw-mannheim.de.`) beim DHBW-Server (`https://certificates.dhbw.cloud`) aus. Ergebnis landet direkt unter `nginx/certs/` — kein Browser-Warnhinweis mehr, da der Server-Betreiber (DHBW) als CA vertraut ist. Erneuerung läuft automatisch über den von `acme.sh` angelegten Cronjob; `make prod-cert-acme` erneut ausführen reicht als manueller Trigger.
+
+Mit dieser Option **`APP_BASE_URL`, `CORS_ORIGINS` und die drei `VITE_*_URL`-Werte in Schritt 2i auf `https://<TLS_DOMAIN>` setzen statt auf `https://<VM-IP>`.**
+
+### Option B: Self-signed-Zertifikat (Fallback, wenn nur eine IP verfügbar ist)
 
 ```bash
 make prod-cert-self-signed PROD_HOST=<VM-IP>

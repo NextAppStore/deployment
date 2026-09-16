@@ -10,7 +10,7 @@ Was es macht
    die Studenten an ihre Kurse und verlinkt die Profs als
    Course-Teacher (Many-to-Many via ``course_teachers``).
 3. Erstellt Beispiel-Apps (Online-IDE, Web-LaTeX, …) deren Repos in
-   der Org ``six7-click-n-deploy`` liegen, plus ein paar private
+   der Org ``NextAppStore`` liegen, plus ein paar private
    Bastel-Apps.
 4. Erzeugt für die öffentlichen Apps ein realistisches Gemisch aus
    ``APPROVED`` / ``PENDING`` / ``REJECTED`` Version-Approvals mit
@@ -183,7 +183,7 @@ ALL_USERS: list[SeedUser] = (
 # ----------------------------------------------------------------
 # Apps die im Store erscheinen. Genau die sechs DHBW-Apps, keine
 # Bastel- oder Studi-Forks mehr — die Liste matcht 1:1 zu den
-# Repos in der Org ``six7-click-n-deploy``. Beschreibungen leben
+# Repos in der Org ``NextAppStore``. Beschreibungen leben
 # als Markdown unter ``app_descriptions/`` und werden hier nur zur
 # Laufzeit eingelesen; der Store rendert sie via MarkdownRenderer.
 # ----------------------------------------------------------------
@@ -230,7 +230,7 @@ APPS: list[SeedApp] = [
     SeedApp(
         name="Online-IDE",
         description=_load_description("Online-IDE.md"),
-        git_link="https://github.com/six7-click-n-deploy/Online-IDE.git",
+        git_link="https://github.com/NextAppStore/Online-IDE.git",
         is_private=False,
         owner_email=_DHBW_OWNER_EMAIL,
         versions=(
@@ -241,7 +241,7 @@ APPS: list[SeedApp] = [
     SeedApp(
         name="Ubuntu-App",
         description=_load_description("Ubuntu-App.md"),
-        git_link="https://github.com/six7-click-n-deploy/Ubuntu-App.git",
+        git_link="https://github.com/NextAppStore/Ubuntu-App.git",
         is_private=True,
         owner_email=_DHBW_OWNER_EMAIL,
         versions=(
@@ -252,7 +252,7 @@ APPS: list[SeedApp] = [
     SeedApp(
         name="Web-LaTeX",
         description=_load_description("Web-LaTeX.md"),
-        git_link="https://github.com/six7-click-n-deploy/Web-LaTeX.git",
+        git_link="https://github.com/NextAppStore/Web-LaTeX.git",
         is_private=False,
         owner_email=_DHBW_OWNER_EMAIL,
         versions=(
@@ -263,7 +263,7 @@ APPS: list[SeedApp] = [
     SeedApp(
         name="Jupyter-Notebook",
         description=_load_description("Jupyter-Notebook.md"),
-        git_link="https://github.com/six7-click-n-deploy/Jupyter-Notebook.git",
+        git_link="https://github.com/NextAppStore/Jupyter-Notebook.git",
         is_private=False,
         owner_email=_DHBW_OWNER_EMAIL,
         versions=(
@@ -274,7 +274,7 @@ APPS: list[SeedApp] = [
     SeedApp(
         name="pgAdmin",
         description=_load_description("pgAdmin.md"),
-        git_link="https://github.com/six7-click-n-deploy/pgAdmin.git",
+        git_link="https://github.com/NextAppStore/pgAdmin.git",
         is_private=True,
         owner_email=_DHBW_OWNER_EMAIL,
         versions=(
@@ -289,7 +289,7 @@ APPS: list[SeedApp] = [
         # Worker mit dem hinterlegten Deploy-Token).
         name="GitLab-CE",
         description=_load_description("GitLab-CE.md"),
-        git_link="https://github.com/six7-click-n-deploy/GitLab-App.git",
+        git_link="https://github.com/NextAppStore/GitLab-App.git",
         is_private=False,
         owner_email=_DHBW_OWNER_EMAIL,
         versions=(
@@ -302,7 +302,7 @@ APPS: list[SeedApp] = [
         # Org-Repo ist privat — Worker klont mit GIT_ACCESS_TOKEN.
         name="Monitoring-Stack",
         description=_load_description("Monitoring-Stack.md"),
-        git_link="https://github.com/six7-click-n-deploy/Monitoring-Stack.git",
+        git_link="https://github.com/NextAppStore/Monitoring-Stack.git",
         is_private=False,
         owner_email=_DHBW_OWNER_EMAIL,
         versions=(

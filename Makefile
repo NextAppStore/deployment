@@ -64,7 +64,7 @@ PGADMIN_PORT       ?= 5050
         clean-dev clean-all prune \
         test-backend test-backend-cov lint-backend lint-backend-fix format-backend \
         prod-up prod-down prod-stop prod-restart prod-pull prod-logs prod-ps \
-        prod-migrate prod-seed prod-cert-self-signed prod-reset \
+        prod-migrate prod-seed prod-cert-self-signed prod-cert-acme prod-reset \
         prod-set-keycloak-urls \
         up down logs build
 
@@ -548,6 +548,37 @@ prod-cert-self-signed: ## Generate a 10-year self-signed cert (override PROD_HOS
 	@echo ""
 	@echo "✓ Self-signed cert für '$(PROD_HOST)' liegt unter $(PROD_CERT_DIR)/"
 	@echo "  Gültig bis: $$(openssl x509 -in $(PROD_CERT_DIR)/cert.pem -noout -enddate | cut -d= -f2)"
+
+prod-cert-acme: ## Issue a real cert via DHBW's ACME server (DNS-01). Reads TLS_DOMAIN/DNS_TSIG_KEY/ACME_ACCOUNT_EMAIL from .env
+	@set -a; . ./.env; set +a; \
+	if [ -z "$$TLS_DOMAIN" ] || [ -z "$$DNS_TSIG_KEY" ] || [ -z "$$ACME_ACCOUNT_EMAIL" ]; then \
+	  echo "❌ TLS_DOMAIN / DNS_TSIG_KEY / ACME_ACCOUNT_EMAIL fehlen in .env"; exit 1; \
+	fi; \
+	mkdir -p $(PROD_CERT_DIR) && chmod 700 $(PROD_CERT_DIR); \
+	if [ ! -f "$$HOME/.acme.sh/acme.sh" ]; then \
+	  echo "📥 Installiere acme.sh..."; \
+	  curl -fsSL https://get.acme.sh | sh -s email="$$ACME_ACCOUNT_EMAIL"; \
+	fi; \
+	install -d -m 700 "$$HOME/.acme-dns"; \
+	printf '%s\n' "$$DNS_TSIG_KEY" > "$$HOME/.acme-dns/tsig.key"; \
+	chmod 600 "$$HOME/.acme-dns/tsig.key"; \
+	"$$HOME/.acme.sh/acme.sh" --register-account \
+	  --server https://certificates.dhbw.cloud -m "$$ACME_ACCOUNT_EMAIL" || true; \
+	export NSUPDATE_SERVER="ns.cloud-ns.dhbw-mannheim.de."; \
+	export NSUPDATE_SERVER_PORT="53"; \
+	export NSUPDATE_KEY="$$HOME/.acme-dns/tsig.key"; \
+	"$$HOME/.acme.sh/acme.sh" --issue \
+	  --server https://certificates.dhbw.cloud \
+	  --dns dns_nsupdate \
+	  -d "$$TLS_DOMAIN" -d "www.$$TLS_DOMAIN"; \
+	"$$HOME/.acme.sh/acme.sh" --install-cert -d "$$TLS_DOMAIN" \
+	  --key-file       "$(PROD_CERT_DIR)/key.pem" \
+	  --fullchain-file "$(PROD_CERT_DIR)/cert.pem" \
+	  --reloadcmd      "docker exec nginx-prod sh -c 'nginx -t && nginx -s reload'"
+	@chmod 600 $(PROD_CERT_DIR)/key.pem
+	@chmod 644 $(PROD_CERT_DIR)/cert.pem
+	@echo ""
+	@echo "✓ ACME-Cert für '$$TLS_DOMAIN' liegt unter $(PROD_CERT_DIR)/ (Renewal via acme.sh-Cronjob automatisch)"
 
 prod-reset: ## ⚠️  STOP prod + DELETE all volumes (DBs, Keycloak, RabbitMQ). Irreversible.
 	@echo "⚠️  This wipes ALL prod data: postgres, keycloak DB, rabbitmq, redis, tfstate."

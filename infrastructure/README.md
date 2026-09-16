@@ -20,11 +20,50 @@ output and writes a small `inventory.ini` that Ansible then deploys onto. The tw
 | Environment | Terraform dir               | Ansible playbook | Inventory                         | Trigger                          |
 |-------------|-----------------------------|------------------|-----------------------------------|----------------------------------|
 | staging     | `terraform/envs/staging`    | `staging.yml`    | generated `inventory.ini`         | push to `main`                   |
+| runner      | `terraform/envs/runner`     | —                | —                                 | manual, one-time (see below)     |
 
 > A separate production environment is documented as future work in
 > the project plan but not yet wired into the codebase. The Terraform
 > module is environment-agnostic, so adding `envs/production/` plus a
 > matching playbook is the obvious extension point.
+
+## Bootstrapping the self-hosted GitHub Actions runner
+
+Both `.github/workflows/staging.yml` and `secret-scan.yml` run on `runs-on: self-hosted` — they
+need a runner already registered against this repo before they can execute. That runner is itself
+just another OpenStack VM, provisioned by `terraform/envs/runner`, **but it cannot be created by
+the CD workflow** (the workflow needs the runner to already exist to run at all). It's a one-time,
+manual bootstrap from an operator machine on the DHBW VPN:
+
+```bash
+cd infrastructure/terraform/envs/runner
+
+# Own SSH keypair for this VM — reuse the staging deploy key if you want one
+# fewer secret to manage, or generate a dedicated one.
+export TF_VAR_ssh_public_key="$(ssh-keygen -y -f /path/to/runner_key)"
+
+# Mint a ~1h registration token just before applying (requires a GitHub PAT/gh auth
+# with admin:org or repo admin rights on NextAppStore/deployment).
+export TF_VAR_github_runner_token="$(gh api -X POST repos/NextAppStore/deployment/actions/runners/registration-token --jq .token)"
+
+terraform init
+terraform apply
+```
+
+Requires the same `OS_AUTH_URL`, `OS_APPLICATION_CREDENTIAL_ID`, `OS_APPLICATION_CREDENTIAL_SECRET`,
+`OS_REGION_NAME` as staging in the environment.
+
+cloud-init on first boot installs Docker, downloads the `actions/runner` release pinned by
+`github_runner_version`, registers it against the repo with the supplied token (label
+`staging-deploy`, customizable via `TF_VAR_runner_labels`), and installs+starts it as a systemd
+service running as a dedicated `github-runner` user (in the `docker` group, so jobs can run
+`docker`/`docker compose`). No further manual steps are needed after `terraform apply` finishes —
+the runner shows up under repo Settings → Actions → Runners once cloud-init completes (a minute or
+two after the VM boots).
+
+To decommission or replace the runner: remove it from Settings → Actions → Runners (or run
+`svc.sh uninstall` over SSH first so GitHub doesn't show a stale offline runner), then
+`terraform destroy` in this env dir.
 
 ## Terraform
 
@@ -32,7 +71,8 @@ output and writes a small `inventory.ini` that Ansible then deploys onto. The tw
 terraform/
 ├── modules/openstack_vm/             # reusable VM module (keypair + instance + optional floating IP + optional Cinder data volume)
 └── envs/
-    └── staging/                      # staging-docker VM (mb1.large)
+    ├── staging/                      # staging-docker VM (mb1.large)
+    └── runner/                       # self-hosted GitHub Actions runner VM (gp1.medium), see below
 ```
 
 Each env dir has:
@@ -116,7 +156,10 @@ created per-run and removed in the workflow's cleanup step.
    `model_files` (a carryover exclude — no compose service in this repo references it).
 4. Renders `keycloak/realm-export.json.j2` with the public `APP_BASE_URL` so Keycloak redirect
    URIs match the deployed host.
-5. Generates a self-signed TLS certificate under `nginx/certs/` on first run (idempotent).
+5. Provisions the TLS certificate under `nginx/certs/`: if `TLS_DOMAIN` is set in the deployed
+   `.env`, issues a real cert via DHBW's ACME server (DNS-01 against the DHBW nameserver, using
+   the `DNS_TSIG_KEY` / `ACME_ACCOUNT_EMAIL` secrets, renewed automatically by acme.sh's own
+   cron job); otherwise falls back to a self-signed cert on first run (idempotent either way).
 6. Runs `community.docker.docker_compose_v2` with `pull: always` against
    `docker-compose.staging.yml` — the full standalone stack (postgres, postgres-tfstate, rabbitmq,
    redis, keycloak + its postgres, backend, worker, frontend, nginx). The explicit `files:` list

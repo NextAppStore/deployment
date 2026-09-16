@@ -217,7 +217,7 @@ services:
   # not re-introduce a backend-migrate init-container here — that
   # pattern hides migration failures inside the compose output.
   backend:
-    image: ghcr.io/six7-click-n-deploy/backend:${BACKEND_VERSION:-latest}
+    image: ghcr.io/nextappstore/backend:${BACKEND_VERSION:-latest}
     container_name: backend-prod
     # The backend image's venv is built at /build/.venv and copied to
     # /app/.venv, so the console scripts (`uvicorn`, `alembic`) carry a
@@ -321,7 +321,7 @@ services:
   # Worker has NO access to the application DB — it only talks to
   # RabbitMQ/Redis (Celery) and postgres-tfstate (Terraform state).
   worker:
-    image: ghcr.io/six7-click-n-deploy/worker:${WORKER_VERSION:-latest}
+    image: ghcr.io/nextappstore/worker:${WORKER_VERSION:-latest}
     container_name: worker-prod
     environment:
       # Celery (broker = RabbitMQ, result backend = Redis)
@@ -412,7 +412,7 @@ services:
   # Frontend (Vue 3 SPA, served by nginx in the image)
   # ----------------------------------------------------------------
   frontend:
-    image: ghcr.io/six7-click-n-deploy/frontend:${FRONTEND_VERSION:-latest}
+    image: ghcr.io/nextappstore/frontend:${FRONTEND_VERSION:-latest}
     container_name: frontend-prod
     environment:
       NODE_ENV: production

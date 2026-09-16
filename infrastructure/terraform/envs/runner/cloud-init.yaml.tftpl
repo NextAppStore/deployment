@@ -1,0 +1,46 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+packages:
+  - git
+  - curl
+  - jq
+  - unzip
+  - ca-certificates
+  - rsync
+
+runcmd:
+  # Docker (the runner itself runs `docker compose` for staging deploys,
+  # plus Terraform/Ansible install their own deps at job time).
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker ubuntu
+
+  # actions-runner needs its own unprivileged user rather than running
+  # as root or reusing "ubuntu" so a compromised job can't silently ride
+  # on the operator's default account's ambient permissions.
+  - useradd -m -s /bin/bash github-runner
+  - usermod -aG docker github-runner
+
+  - mkdir -p /home/github-runner/actions-runner
+  - >-
+    curl -o /home/github-runner/actions-runner/runner.tar.gz -L
+    https://github.com/actions/runner/releases/download/v${github_runner_version}/actions-runner-linux-x64-${github_runner_version}.tar.gz
+  - tar xzf /home/github-runner/actions-runner/runner.tar.gz -C /home/github-runner/actions-runner
+  - rm /home/github-runner/actions-runner/runner.tar.gz
+  - chown -R github-runner:github-runner /home/github-runner/actions-runner
+
+  # config.sh's registration token is single-use / ~1h TTL, minted by the
+  # operator immediately before `terraform apply` (see variables.tf) —
+  # never a stored secret, so safe to pass through user_data.
+  - >-
+    sudo -u github-runner /home/github-runner/actions-runner/config.sh
+    --unattended
+    --url https://github.com/${github_repo}
+    --token ${github_runner_token}
+    --name runner-$(hostname)
+    --labels ${runner_labels}
+    --work _work
+
+  - cd /home/github-runner/actions-runner && ./svc.sh install github-runner
+  - cd /home/github-runner/actions-runner && ./svc.sh start
