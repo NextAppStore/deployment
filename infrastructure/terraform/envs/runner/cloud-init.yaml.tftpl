@@ -22,6 +22,17 @@ runcmd:
   - useradd -m -s /bin/bash github-runner
   - usermod -aG docker github-runner
 
+  # CI steps (Trivy install, apt-get in the Ansible step, etc.) call sudo
+  # non-interactively; without a NOPASSWD rule those fail with "a terminal
+  # is required to read the password".
+  - echo 'github-runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/github-runner
+  - chmod 440 /etc/sudoers.d/github-runner
+
+  # Terraform's local backend (staging/runner envs) stores state + lock
+  # here; the CI job runs as github-runner, so it needs write access.
+  - mkdir -p /var/lib/tf-state
+  - chown -R github-runner:github-runner /var/lib/tf-state
+
   - mkdir -p /home/github-runner/actions-runner
   - >-
     curl -o /home/github-runner/actions-runner/runner.tar.gz -L

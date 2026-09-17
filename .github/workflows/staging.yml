@@ -13,10 +13,10 @@ jobs:
       contents: read
       security-events: write
     env:
-      OS_AUTH_URL: ${{ secrets.STAGING_OS_AUTH_URL }}
-      OS_APPLICATION_CREDENTIAL_ID: ${{ secrets.STAGING_OS_APPLICATION_CREDENTIAL_ID }}
-      OS_APPLICATION_CREDENTIAL_SECRET: ${{ secrets.STAGING_OS_APPLICATION_CREDENTIAL_SECRET }}
-      OS_REGION_NAME: ${{ secrets.STAGING_OS_REGION_NAME }}
+      OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+      OS_APPLICATION_CREDENTIAL_ID: ${{ secrets.OS_APPLICATION_CREDENTIAL_ID }}
+      OS_APPLICATION_CREDENTIAL_SECRET: ${{ secrets.OS_APPLICATION_CREDENTIAL_SECRET }}
+      OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
