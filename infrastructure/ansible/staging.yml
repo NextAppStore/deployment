@@ -343,6 +343,53 @@
         state: present
       register: compose_output
 
+    # Keycloak only imports realm-export.json on first boot with an empty
+    # DB (persisted in keycloak_postgres_prod_data) — on every later deploy
+    # the realm already exists, so re-rendering the JSON template has no
+    # effect. Sync the two clients' URLs via the Admin CLI instead, so they
+    # can never drift from the live APP_BASE_URL/VM IP.
+    - name: Keycloak Client-URLs auf aktuelle VM-IP synchronisieren
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          admin_user=$(grep -E '^KEYCLOAK_ADMIN_USER=' "{{ project_root }}/.env" | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r')
+          admin_password=$(grep -E '^KEYCLOAK_ADMIN_PASSWORD=' "{{ project_root }}/.env" | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r')
+
+          kcadm() { docker exec keycloak-prod /opt/keycloak/bin/kcadm.sh "$@"; }
+
+          # No curl in the Keycloak image, so use the admin login itself as
+          # the readiness probe: it fails with a connection error until the
+          # JVM has finished starting (~10-15s after "Running" state).
+          for i in $(seq 1 30); do
+            if kcadm config credentials --server http://localhost:8080 --realm master \
+                --user "$admin_user" --password "$admin_password"; then
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Keycloak did not become ready in time" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          frontend_uuid=$(kcadm get clients -r dhbw -q clientId=appstore-frontend --fields id --format csv --noquotes)
+          kcadm update "clients/${frontend_uuid}" -r dhbw \
+            -s 'redirectUris=["{{ app_base_url }}/*","http://localhost:5173/*"]' \
+            -s 'webOrigins=["{{ app_base_url }}","http://localhost:5173"]' \
+            -s 'attributes."post.logout.redirect.uris"="http://localhost:5173/*##{{ app_base_url }}/*"'
+
+          backend_uuid=$(kcadm get clients -r dhbw -q clientId=appstore-backend --fields id --format csv --noquotes)
+          kcadm update "clients/${backend_uuid}" -r dhbw \
+            -s 'rootUrl="{{ app_api_url }}"' \
+            -s 'adminUrl="{{ app_api_url }}"' \
+            -s 'redirectUris=["{{ app_api_url }}/*"]' \
+            -s 'webOrigins=["{{ app_api_url }}"]'
+        executable: /bin/bash
+      vars:
+        app_base_url: "{{ app_base_url_raw.stdout | trim }}"
+        app_api_url: "{{ (app_base_url_raw.stdout | trim) }}/api"
+      changed_when: true
+
     # Migrations live OUTSIDE the compose file on purpose: a previous
     # backend-migrate init container buried failure stderr inside the
     # compose JSON. Running alembic as its own playbook step surfaces
