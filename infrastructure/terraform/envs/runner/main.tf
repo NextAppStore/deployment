@@ -44,6 +44,12 @@ module "vm" {
 
   docker_data_volume_size_gb = 0
 
+  # Durable Cinder volume for Terraform's local-backend state (staging +
+  # runner envs). Kept separate from the root disk so it survives this VM
+  # being rebuilt/replaced; only destroying the volume resource itself
+  # (module.vm's openstack_blockstorage_volume_v3.state_data) loses it.
+  state_volume_size_gb = 10
+
   user_data = templatefile("${path.module}/cloud-init.yaml.tftpl", {
     github_repo           = var.github_repo
     github_runner_token   = var.github_runner_token

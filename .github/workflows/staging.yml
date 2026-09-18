@@ -84,7 +84,7 @@ jobs:
       - name: Install Ansible and Dependencies
         run: |
           sudo apt-get install -y rsync python3-pip
-          pip3 install --user "ansible>=8.0"
+          pip3 install --user --break-system-packages "ansible>=8.0"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           ansible-galaxy role install -r infrastructure/ansible/requirements.yml -p infrastructure/ansible/roles_external
           ansible-galaxy collection install -r infrastructure/ansible/requirements.yml

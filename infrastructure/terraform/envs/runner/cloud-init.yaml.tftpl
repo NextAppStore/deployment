@@ -28,9 +28,25 @@ runcmd:
   - echo 'github-runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/github-runner
   - chmod 440 /etc/sudoers.d/github-runner
 
-  # Terraform's local backend (staging/runner envs) stores state + lock
-  # here; the CI job runs as github-runner, so it needs write access.
-  - mkdir -p /var/lib/tf-state
+  # Terraform's local backend (staging/runner envs) stores state + lock at
+  # /var/lib/tf-state. Backed by a separate Cinder volume (module.vm's
+  # state_volume_size_gb), not the root disk, so it survives this VM being
+  # rebuilt. The attach resource applies after the instance boots, so wait
+  # for the device to show up rather than assuming it's there immediately.
+  # Identified structurally (the one non-root virtio disk) rather than by
+  # volume ID, since that ID isn't knowable from within user_data (the
+  # instance must exist before the volume can attach to it).
+  - >-
+    for i in $(seq 1 30); do
+      DEV=$(lsblk -ndo NAME,TYPE,PKNAME | awk '$2=="disk" && $3=="" {print $1}' | grep -v '^vda$' | head -n1);
+      [ -n "$DEV" ] && break;
+      sleep 2;
+    done;
+    DEV="/dev/$DEV";
+    blkid "$DEV" || mkfs.ext4 "$DEV";
+    mkdir -p /var/lib/tf-state;
+    mount "$DEV" /var/lib/tf-state;
+    grep -q "$DEV" /etc/fstab || echo "$DEV /var/lib/tf-state ext4 defaults,nofail 0 2" >> /etc/fstab
   - chown -R github-runner:github-runner /var/lib/tf-state
 
   - mkdir -p /home/github-runner/actions-runner
