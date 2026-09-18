@@ -313,8 +313,13 @@
     # Startet die Moodle-Container (start.sh Schritt 5). MOODLE_DOCKER_WEB_HOST
     # wird auf die echte Domain gesetzt statt auf "localhost" (start.sh-Default),
     # damit Moodles eigene Site-Konfiguration zur öffentlichen Domain passt.
+    #
+    # base.yml definiert immer auch "exttests" und "selenium" (Behat/Testing-
+    # Images), unabhängig von MOODLE_DOCKER_BROWSER — start.sh nutzt diese nie,
+    # sie kosten hier nur zusätzliche (teils grosse, ratelimit-anfällige) Pulls.
+    # Explizite Service-Liste startet nur, was tatsächlich gebraucht wird.
     - name: Moodle-Docker-Container starten
-      ansible.builtin.command: bin/moodle-docker-compose up -d
+      ansible.builtin.command: bin/moodle-docker-compose up -d webserver db mailpit
       args:
         chdir: "{{ project_root }}/DevMoodle/moodle-docker"
       environment:
