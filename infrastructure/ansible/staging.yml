@@ -68,10 +68,10 @@
         group: ubuntu
         mode: '0600'
       loop:
-        - { key: "APP_BASE_URL", value: "https://[{{ ansible_host }}]" }
-        - { key: "VITE_APP_URL", value: "https://[{{ ansible_host }}]" }
-        - { key: "VITE_API_URL", value: "https://[{{ ansible_host }}]/api" }
-        - { key: "VITE_KEYCLOAK_URL", value: "https://[{{ ansible_host }}]" }
+        - { key: "APP_BASE_URL", value: "https://[{{ inventory_hostname }}]" }
+        - { key: "VITE_APP_URL", value: "https://[{{ inventory_hostname }}]" }
+        - { key: "VITE_API_URL", value: "https://[{{ inventory_hostname }}]/api" }
+        - { key: "VITE_KEYCLOAK_URL", value: "https://[{{ inventory_hostname }}]" }
       loop_control:
         label: "{{ item.key }}"
 
@@ -114,8 +114,8 @@
             openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
               -keyout {{ project_root }}/nginx/certs/key.pem \
               -out    {{ project_root }}/nginx/certs/cert.pem \
-              -subj "/CN={{ ansible_host }}" \
-              -addext "subjectAltName=IP:{{ ansible_host }}"
+              -subj "/CN={{ inventory_hostname }}" \
+              -addext "subjectAltName=IP:{{ inventory_hostname }}"
             chmod 600 {{ project_root }}/nginx/certs/key.pem
             echo "cert generated"
           else
