@@ -250,9 +250,6 @@
         owner: root
         group: root
         mode: '0644'
-      vars:
-        moodle_domain: "{{ moodle_domain }}"
-        moodle_web_port: "{{ moodle_web_port }}"
 
     - name: nginx-vhost aktivieren
       ansible.builtin.file:
