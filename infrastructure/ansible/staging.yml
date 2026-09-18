@@ -54,6 +54,27 @@
         group: ubuntu
         mode: '0600'
 
+    # The staging VM's IP is dynamically allocated by OpenStack and can
+    # change between deploys, but APP_BASE_URL/VITE_* in the STAGING_ENV_FILE
+    # secret are static — overwrite them here with the live ansible_host so
+    # the frontend/backend/Keycloak always agree on the VM's actual address.
+    - name: APP_BASE_URL und VITE_* auf aktuelle VM-IP setzen
+      ansible.builtin.lineinfile:
+        path: "{{ project_root }}/.env"
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+        create: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+      loop:
+        - { key: "APP_BASE_URL", value: "https://[{{ ansible_host }}]" }
+        - { key: "VITE_APP_URL", value: "https://[{{ ansible_host }}]" }
+        - { key: "VITE_API_URL", value: "https://[{{ ansible_host }}]/api" }
+        - { key: "VITE_KEYCLOAK_URL", value: "https://[{{ ansible_host }}]" }
+      loop_control:
+        label: "{{ item.key }}"
+
     - name: APP_BASE_URL aus .env lesen
       ansible.builtin.shell:
         cmd: |
