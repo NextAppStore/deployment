@@ -109,6 +109,18 @@ jobs:
           ANSIBLE_FORCE_COLOR: 'True'
           STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
 
+      - name: Debug - Container status and logs
+        if: always()
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/openstack-key ubuntu@"$VM_IP" '
+            echo "=== docker ps ===" &&
+            sudo docker ps -a &&
+            echo "=== keycloak-prod logs (last 100) ===" &&
+            sudo docker logs --tail 100 keycloak-prod 2>&1 &&
+            echo "=== nginx-prod logs (last 100) ===" &&
+            sudo docker logs --tail 100 nginx-prod 2>&1
+          '
+
       - name: Cleanup Sensitive Files
         if: always()
         run: |
