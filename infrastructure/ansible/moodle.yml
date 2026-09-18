@@ -1,0 +1,375 @@
+---
+- name: 2. CONFIGURE Docker and Deploy Moodle (DevMoodle) on a fresh VM
+  hosts: docker_vm
+  become: yes
+  gather_facts: yes
+
+  vars:
+    docker_users: ["ubuntu"]
+    docker_install_compose: true
+    project_root: "/home/ubuntu/moodle"
+    moodle_web_port: 8000
+    moodle_repo: "https://github.com/NextAppStore/DevMoodle"
+    moodle_repo_version: "main"
+    # Pinned to match the commit DevMoodle/start.sh clones — must stay in
+    # sync with that script and with moodle-data/seed.sql.gz, which was
+    # exported against this exact Moodle checkout.
+    moodle_src_commit: "8eae8fc94d0e3932cbc64f1e81414903a1e2e83b"
+
+  pre_tasks:
+    - name: Verzeichnis für Moodle erstellen
+      ansible.builtin.file:
+        path: "{{ project_root }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+  roles:
+    - role: geerlingguy.docker
+      tags: [docker_install]
+
+  tasks:
+    - name: nginx, git und curl installieren
+      ansible.builtin.apt:
+        name: [nginx, git, curl]
+        state: present
+        update_cache: yes
+
+    - name: .env aus MOODLE_ENV_FILE auf VM schreiben
+      ansible.builtin.copy:
+        content: "{{ lookup('env', 'MOODLE_ENV_FILE') }}"
+        dest: "{{ project_root }}/.env"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+
+    - name: DevMoodle-Repository klonen
+      ansible.builtin.git:
+        repo: "{{ moodle_repo }}"
+        dest: "{{ project_root }}/DevMoodle"
+        version: "{{ moodle_repo_version }}"
+        force: yes
+
+    # Ansible's git module can be unreliable recursing submodules across
+    # versions, so init them explicitly — mirrors start.sh step 2.
+    - name: Git-Submodule (moodle-docker) initialisieren
+      ansible.builtin.command: git submodule update --init --recursive
+      args:
+        chdir: "{{ project_root }}/DevMoodle"
+      changed_when: true
+
+    # ----------------------------------------------------------------
+    # TLS certificate provisioning — done before Moodle containers start
+    # and before nginx is (re)configured, since nginx needs certs in
+    # place to bind to 443. Same two-path pattern as staging.yml:
+    #   - TLS_DOMAIN set   -> real cert for moodle.<TLS_DOMAIN> via
+    #                         DHBW's ACME server (DNS-01 / acme.sh).
+    #   - TLS_DOMAIN empty -> self-signed fallback.
+    # ----------------------------------------------------------------
+    - name: TLS_DOMAIN aus .env lesen
+      ansible.builtin.shell:
+        cmd: |
+          grep -E '^TLS_DOMAIN=' "{{ project_root }}/.env" \
+            | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r'
+        executable: /bin/bash
+      register: tls_domain_raw
+      changed_when: false
+
+    - name: moodle_domain setzen
+      ansible.builtin.set_fact:
+        moodle_domain: "{{ ('moodle.' + (tls_domain_raw.stdout | trim)) if (tls_domain_raw.stdout | trim != '') else inventory_hostname }}"
+
+    - name: TLS_DOMAIN-abhängige DNS/AAAA-Einrichtung
+      when: tls_domain_raw.stdout | trim != ''
+      block:
+        # DNS_TSIG_KEY is the literal BIND ``key "..." { ...; };`` clause,
+        # shell-quoted in .env — source the line through bash to let it do
+        # the unquoting rather than a plain grep/cut.
+        - name: DNS_TSIG_KEY aus .env lesen
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              line=$(grep -E '^DNS_TSIG_KEY=' "{{ project_root }}/.env" | head -n1 | tr -d '\r')
+              eval "$line"
+              printf '%s' "$DNS_TSIG_KEY"
+            executable: /bin/bash
+          register: dns_tsig_key_raw
+          changed_when: false
+
+        - name: TLS-Variablen setzen
+          ansible.builtin.set_fact:
+            tls_domain: "{{ tls_domain_raw.stdout | trim }}"
+            dns_tsig_key: "{{ dns_tsig_key_raw.stdout | trim }}"
+
+        - name: TSIG-Key-Verzeichnis anlegen
+          ansible.builtin.file:
+            path: /etc/acme-dns
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: tsig.key schreiben
+          ansible.builtin.copy:
+            content: "{{ dns_tsig_key }}\n"
+            dest: /etc/acme-dns/tsig.key
+            owner: root
+            group: root
+            mode: '0600'
+
+        # Keeps moodle.<TLS_DOMAIN>'s AAAA record pointed at this VM's
+        # live IP on every deploy — OpenStack allocates a new IPv6 on VM
+        # recreation, so the record would otherwise silently go stale.
+        - name: AAAA-Record für moodle.<TLS_DOMAIN> aktualisieren
+          ansible.builtin.shell:
+            cmd: |
+              set -euo pipefail
+              nsupdate -k /etc/acme-dns/tsig.key <<EOF
+              server ns.cloud-ns.dhbw-mannheim.de. 53
+              zone {{ tls_domain }}
+              update delete moodle.{{ tls_domain }}. IN AAAA
+              update add moodle.{{ tls_domain }}. 60 IN AAAA {{ inventory_hostname }}
+              send
+              EOF
+            executable: /bin/bash
+          changed_when: true
+
+    - name: Verzeichnis für nginx-Zertifikate anlegen
+      ansible.builtin.file:
+        path: /etc/nginx/certs/moodle
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Self-signed TLS-Zertifikat generieren (falls nicht vorhanden)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          if [ ! -f /etc/nginx/certs/moodle/cert.pem ]; then
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+              -keyout /etc/nginx/certs/moodle/key.pem \
+              -out    /etc/nginx/certs/moodle/cert.pem \
+              -subj "/CN={{ inventory_hostname }}" \
+              -addext "subjectAltName=IP:{{ inventory_hostname }}"
+            chmod 600 /etc/nginx/certs/moodle/key.pem
+            echo "cert generated"
+          else
+            echo "cert exists, skipped"
+          fi
+        executable: /bin/bash
+      register: cert_result
+      changed_when: "'cert generated' in cert_result.stdout"
+      when: tls_domain_raw.stdout | trim == ''
+
+    - name: ACME-TLS-Zertifikat via acme.sh besorgen (DNS-01, DHBW ACME-Server)
+      when: tls_domain_raw.stdout | trim != ''
+      block:
+        - name: ACME_ACCOUNT_EMAIL aus .env lesen
+          ansible.builtin.shell:
+            cmd: |
+              grep -E '^ACME_ACCOUNT_EMAIL=' "{{ project_root }}/.env" \
+                | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r'
+            executable: /bin/bash
+          register: acme_email_raw
+          changed_when: false
+
+        - name: ACME-Variablen setzen
+          ansible.builtin.set_fact:
+            acme_account_email: "{{ acme_email_raw.stdout | trim }}"
+
+        - name: acme.sh installiert? prüfen
+          ansible.builtin.stat:
+            path: /root/.acme.sh/acme.sh
+          register: acme_sh_bin
+
+        - name: acme.sh installieren (idempotent)
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              curl -fsSL https://get.acme.sh | sh -s email={{ acme_account_email }}
+            executable: /bin/bash
+          when: not acme_sh_bin.stat.exists
+
+        - name: ACME-Account beim DHBW-Server registrieren (idempotent)
+          ansible.builtin.shell:
+            cmd: |
+              /root/.acme.sh/acme.sh --register-account \
+                --server https://certificates.dhbw.cloud \
+                -m {{ acme_account_email }}
+            executable: /bin/bash
+          register: acme_register
+          changed_when: "'Registering account' in acme_register.stdout"
+          failed_when: acme_register.rc != 0 and 'already registered' not in acme_register.stdout
+
+        # acme.sh tracks issuance/renewal state itself, so call --issue
+        # unconditionally every run rather than reimplementing that check
+        # via file existence. Exit code 2 means "Skipping, cert not due
+        # for renewal yet" — the expected steady-state outcome.
+        - name: Zertifikat ausstellen / erneuern (acme.sh entscheidet selbst ob nötig)
+          ansible.builtin.shell:
+            cmd: |
+              export NSUPDATE_SERVER="ns.cloud-ns.dhbw-mannheim.de."
+              export NSUPDATE_SERVER_PORT="53"
+              export NSUPDATE_KEY="/etc/acme-dns/tsig.key"
+              /root/.acme.sh/acme.sh --issue \
+                --server https://certificates.dhbw.cloud \
+                --dns dns_nsupdate \
+                -d moodle.{{ tls_domain }}
+            executable: /bin/bash
+          register: acme_issue
+          changed_when: "'Cert success' in acme_issue.stdout"
+          failed_when: acme_issue.rc not in [0, 2]
+
+        - name: Zertifikat nach /etc/nginx/certs/moodle installieren (inkl. Reload-Hook)
+          ansible.builtin.shell:
+            cmd: |
+              /root/.acme.sh/acme.sh --install-cert -d moodle.{{ tls_domain }} \
+                --key-file       /etc/nginx/certs/moodle/key.pem \
+                --fullchain-file /etc/nginx/certs/moodle/cert.pem \
+                --reloadcmd      "systemctl reload nginx"
+            executable: /bin/bash
+          register: acme_install
+          changed_when: true
+
+        - name: Berechtigungen auf installiertes Zertifikat setzen
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            owner: root
+            group: root
+            mode: "{{ item.mode }}"
+          loop:
+            - { path: "/etc/nginx/certs/moodle/key.pem", mode: '0600' }
+            - { path: "/etc/nginx/certs/moodle/cert.pem", mode: '0644' }
+
+    - name: nginx-vhost für Moodle rendern
+      ansible.builtin.template:
+        src: templates/moodle-nginx.conf.j2
+        dest: /etc/nginx/sites-available/moodle.conf
+        owner: root
+        group: root
+        mode: '0644'
+      vars:
+        moodle_domain: "{{ moodle_domain }}"
+        moodle_web_port: "{{ moodle_web_port }}"
+
+    - name: nginx-vhost aktivieren
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/moodle.conf
+        dest: /etc/nginx/sites-enabled/moodle.conf
+        state: link
+
+    - name: Standard-nginx-Site deaktivieren
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: nginx-Konfiguration prüfen
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: nginx neu starten
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+        enabled: yes
+
+    # Moodle-Quellcode auf gepinnten Commit klonen (start.sh Schritt 3) —
+    # passt exakt zum Stand von moodle-data/seed.sql.gz.
+    - name: Prüfen ob Moodle-Quellcode bereits vorhanden ist
+      ansible.builtin.stat:
+        path: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
+      register: moodle_config_php
+
+    - name: Moodle-Quellcode klonen (gepinnt)
+      when: not moodle_config_php.stat.exists
+      block:
+        - name: moodle-src Git-Repo initialisieren
+          ansible.builtin.command: git init -q "{{ project_root }}/DevMoodle/moodle-docker/moodle-src"
+          changed_when: true
+
+        - name: Moodle-Upstream-Remote setzen
+          ansible.builtin.command: git remote add origin https://github.com/moodle/moodle.git
+          args:
+            chdir: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src"
+          changed_when: true
+
+        - name: Gepinnten Moodle-Commit fetchen
+          ansible.builtin.command: git fetch --depth 1 origin {{ moodle_src_commit }}
+          args:
+            chdir: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src"
+          changed_when: true
+
+        - name: Gepinnten Moodle-Commit auschecken
+          ansible.builtin.command: git checkout -q FETCH_HEAD
+          args:
+            chdir: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src"
+          changed_when: true
+
+        - name: config.php aus Template erstellen
+          ansible.builtin.copy:
+            src: "{{ project_root }}/DevMoodle/moodle-docker/config.docker-template.php"
+            dest: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
+            remote_src: yes
+
+    # Startet die Moodle-Container (start.sh Schritt 5). MOODLE_DOCKER_WEB_HOST
+    # wird auf die echte Domain gesetzt statt auf "localhost" (start.sh-Default),
+    # damit Moodles eigene Site-Konfiguration zur öffentlichen Domain passt.
+    - name: Moodle-Docker-Container starten
+      ansible.builtin.command: bin/moodle-docker-compose up -d
+      args:
+        chdir: "{{ project_root }}/DevMoodle/moodle-docker"
+      environment:
+        MOODLE_DOCKER_WWWROOT: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src"
+        MOODLE_DOCKER_DB: pgsql
+        MOODLE_DOCKER_WEB_PORT: "{{ moodle_web_port }}"
+        MOODLE_DOCKER_WEB_HOST: "{{ moodle_domain }}"
+      changed_when: true
+
+    - name: Auf Datenbank warten
+      ansible.builtin.command: bin/moodle-docker-wait-for-db
+      args:
+        chdir: "{{ project_root }}/DevMoodle/moodle-docker"
+      environment:
+        MOODLE_DOCKER_WWWROOT: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src"
+        MOODLE_DOCKER_DB: pgsql
+        MOODLE_DOCKER_WEB_PORT: "{{ moodle_web_port }}"
+        MOODLE_DOCKER_WEB_HOST: "{{ moodle_domain }}"
+      changed_when: false
+
+    # Seed-Import (start.sh Schritt 6). docker-compose v2 Namensschema:
+    # Bindestriche statt Unterstriche.
+    - name: Prüfen ob Moodle-Datenbank bereits initialisiert ist
+      ansible.builtin.shell:
+        cmd: |
+          docker exec moodle-docker-db-1 psql -U moodle -d moodle -t \
+            -c "SELECT to_regclass('public.m_course');" 2>/dev/null | tr -d '[:space:]'
+        executable: /bin/bash
+      register: moodle_db_initialized
+      changed_when: false
+
+    - name: Vorkonfigurierte Moodle-Daten einspielen (seed.sql.gz)
+      when: moodle_db_initialized.stdout == '' or moodle_db_initialized.stdout == 'NULL'
+      block:
+        - name: seed.sql.gz in Datenbank einspielen
+          ansible.builtin.shell:
+            cmd: |
+              set -euo pipefail
+              gunzip -c "{{ project_root }}/DevMoodle/moodle-data/seed.sql.gz" \
+                | docker exec -i moodle-docker-db-1 psql -U moodle -d moodle >/dev/null
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Moodle-Caches leeren
+          ansible.builtin.command: docker exec moodle-docker-webserver-1 php admin/cli/purge_caches.php
+          changed_when: true
+
+    - name: Status der Moodle-Container anzeigen
+      ansible.builtin.command: docker ps --filter "name=moodle-docker"
+      register: moodle_ps
+      changed_when: false
+
+    - name: Status anzeigen
+      ansible.builtin.debug:
+        var: moodle_ps.stdout_lines

@@ -1,0 +1,130 @@
+name: CD - Moodle Deployment
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/terraform/envs/moodle/**'
+      - 'infrastructure/terraform/modules/**'
+      - 'infrastructure/ansible/moodle.yml'
+      - 'infrastructure/ansible/templates/moodle-nginx.conf.j2'
+      - '.github/workflows/moodle.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Moodle Deploy
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+      OS_APPLICATION_CREDENTIAL_ID: ${{ secrets.OS_APPLICATION_CREDENTIAL_ID }}
+      OS_APPLICATION_CREDENTIAL_SECRET: ${{ secrets.OS_APPLICATION_CREDENTIAL_SECRET }}
+      OS_REGION_NAME: ${{ secrets.OS_REGION_NAME }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Format Check
+        working-directory: infrastructure/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      # Non-blocking, same as staging: surfaces HIGH/CRITICAL IaC findings
+      # without halting deploys.
+      - name: Terraform Security Scan (Trivy)
+        continue-on-error: true
+        run: |
+          trivy config --severity HIGH,CRITICAL infrastructure/terraform
+
+      - name: Terraform Security Scan (Trivy, SARIF)
+        if: always()
+        run: |
+          trivy config --severity HIGH,CRITICAL --format sarif --output trivy-iac-moodle.sarif infrastructure/terraform
+
+      - name: Upload Trivy IaC results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-iac-moodle.sarif
+          category: trivy-iac-moodle
+
+      - name: Set up SSH Key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/openstack-key
+          chmod 600 ~/.ssh/openstack-key
+          ssh-keygen -y -P '' -f ~/.ssh/openstack-key > ~/.ssh/openstack-key.pub
+          echo "TF_VAR_ssh_public_key=$(cat ~/.ssh/openstack-key.pub)" >> "$GITHUB_ENV"
+
+      - name: Terraform Init, Validate, Plan & Apply
+        working-directory: infrastructure/terraform/envs/moodle
+        run: |
+          terraform init
+          terraform validate
+          terraform plan -out=tfplan
+          terraform apply tfplan
+          echo "VM_IP=$(terraform output -raw vm_ip)" >> "$GITHUB_ENV"
+
+      - name: Install Ansible and Dependencies
+        run: |
+          sudo apt-get install -y rsync python3-pip
+          pip3 install --user --break-system-packages "ansible>=8.0"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          ansible-galaxy role install -r infrastructure/ansible/requirements.yml -p infrastructure/ansible/roles_external
+          ansible-galaxy collection install -r infrastructure/ansible/requirements.yml
+
+      - name: Generate Ansible Inventory
+        working-directory: infrastructure/ansible
+        run: |
+          cat > inventory.ini <<EOF
+          [docker_vm]
+          ${VM_IP} ansible_user=ubuntu
+          EOF
+          echo "Inventory:" && cat inventory.ini
+
+      - name: Run Ansible Playbook
+        working-directory: infrastructure/ansible
+        run: |
+          ansible-playbook -i inventory.ini \
+            --private-key ~/.ssh/openstack-key moodle.yml
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: 'False'
+          ANSIBLE_FORCE_COLOR: 'True'
+          MOODLE_ENV_FILE: ${{ secrets.MOODLE_ENV_FILE }}
+
+      - name: Debug - Container status, nginx and logs
+        if: always()
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/openstack-key ubuntu@"$VM_IP" '
+            echo "=== docker ps ===" &&
+            sudo docker ps -a &&
+            echo "=== moodle webserver logs (last 100) ===" &&
+            sudo docker logs --tail 100 moodle-docker-webserver-1 2>&1 &&
+            echo "=== moodle db logs (last 100) ===" &&
+            sudo docker logs --tail 100 moodle-docker-db-1 2>&1 &&
+            echo "=== nginx status ===" &&
+            sudo systemctl status nginx --no-pager &&
+            sudo nginx -t
+          '
+
+      - name: Cleanup Sensitive Files
+        if: always()
+        run: |
+          rm -f ~/.ssh/openstack-key ~/.ssh/openstack-key.pub
+          rm -f infrastructure/ansible/inventory.ini
+          echo "Sensitive deployment artifacts removed."

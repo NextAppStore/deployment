@@ -20,6 +20,7 @@ output and writes a small `inventory.ini` that Ansible then deploys onto. The tw
 | Environment | Terraform dir               | Ansible playbook | Inventory                         | Trigger                          |
 |-------------|-----------------------------|------------------|-----------------------------------|----------------------------------|
 | staging     | `terraform/envs/staging`    | `staging.yml`    | generated `inventory.ini`         | push to `main`                   |
+| moodle      | `terraform/envs/moodle`     | `moodle.yml`     | generated `inventory.ini`         | push to `main` (paths-filtered)  |
 | runner      | `terraform/envs/runner`     | —                | —                                 | manual, one-time (see below)     |
 
 > A separate production environment is documented as future work in
@@ -72,6 +73,7 @@ terraform/
 ├── modules/openstack_vm/             # reusable VM module (keypair + instance + optional floating IP + optional Cinder data volume)
 └── envs/
     ├── staging/                      # staging-docker VM (mb1.large)
+    ├── moodle/                       # moodle-docker VM (gp1.large), see below
     └── runner/                       # self-hosted GitHub Actions runner VM (gp1.medium), see below
 ```
 
@@ -201,6 +203,37 @@ Validate the staging compose locally with:
 docker compose -f docker-compose.staging.yml config
 ```
 
+### Moodle
+
+`moodle.yml` provisions a separate VM (`terraform/envs/moodle`) running
+[NextAppStore/DevMoodle](https://github.com/NextAppStore/DevMoodle), reachable at
+`moodle.<TLS_DOMAIN>`. Unlike staging, this repo isn't deployed to the VM — Ansible clones
+DevMoodle directly onto it and reimplements the steps of DevMoodle's `start.sh` (rather than
+shelling out to it verbatim), so that TLS certificate provisioning can be sequenced in between:
+
+1. Creates `/home/ubuntu/moodle`, installs `nginx`/`git`/`curl`, applies `geerlingguy.docker`.
+2. Clones `DevMoodle` (`git`) and initializes its `moodle-docker` submodule.
+3. Provisions the TLS certificate — same self-signed/ACME-via-`acme.sh` pattern as staging (see
+   below), but for `moodle.<TLS_DOMAIN>` and installed to `/etc/nginx/certs/moodle/` on the host
+   rather than a container-mounted path.
+4. Renders `templates/moodle-nginx.conf.j2` to a host nginx vhost proxying
+   `moodle.<TLS_DOMAIN>` (443) to the Moodle webserver container on `127.0.0.1:8000`.
+5. Clones Moodle core pinned to the same commit `DevMoodle/start.sh` uses (kept in sync manually —
+   see the `moodle_src_commit` var in `moodle.yml`), matching what `moodle-data/seed.sql.gz` was
+   exported against.
+6. Starts the Moodle containers via `bin/moodle-docker-compose up -d`, with
+   `MOODLE_DOCKER_WEB_HOST` set to the real public domain (`moodle.<TLS_DOMAIN>`) instead of
+   `start.sh`'s `localhost` default.
+7. Imports the demo seed DB (`moodle-data/seed.sql.gz`) on first run, same as `start.sh`.
+
+This is a demo/staging-style deployment: DevMoodle's hardcoded DB credentials
+(`moodle`/`m@0dl3ing`) and admin login (`admin`/`test`) are kept as-is, matching how DevMoodle is
+meant to be used.
+
+Requires a `MOODLE_ENV_FILE` secret (parallel to `STAGING_ENV_FILE`) containing just the
+TLS-related keys: `TLS_DOMAIN`, `DNS_TSIG_KEY`, `ACME_ACCOUNT_EMAIL`. All other secrets
+(`OS_*`, `SSH_PRIVATE_KEY`) are shared with staging.
+
 ## CI/CD workflows
 
 The staging workflow (`.github/workflows/staging.yml`) runs on every push to `main` and
@@ -229,6 +262,10 @@ follows this shape:
 `STAGING_OS_APPLICATION_CREDENTIAL_SECRET`, `STAGING_OS_REGION_NAME`, plus a shared
 `SSH_PRIVATE_KEY` — an **unencrypted** private key. Terraform registers its derived public half as
 the OpenStack keypair, so there is no separate "key pair" name to keep in sync.
+
+`.github/workflows/moodle.yml` reuses the same `OS_*`/`SSH_PRIVATE_KEY` secrets (one OpenStack
+project, one deploy keypair) plus its own `MOODLE_ENV_FILE` secret (`TLS_DOMAIN`, `DNS_TSIG_KEY`,
+`ACME_ACCOUNT_EMAIL` — see the "Moodle" section above).
 
 ### Notes / follow-ups
 
