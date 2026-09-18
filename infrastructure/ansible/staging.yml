@@ -54,45 +54,16 @@
         group: ubuntu
         mode: '0600'
 
-    # The staging VM's IP is dynamically allocated by OpenStack and can
-    # change between deploys, but APP_BASE_URL/VITE_* in the STAGING_ENV_FILE
-    # secret are static — overwrite them here with the live ansible_host so
-    # the frontend/backend/Keycloak always agree on the VM's actual address.
-    - name: APP_BASE_URL und VITE_* auf aktuelle VM-IP setzen
-      ansible.builtin.lineinfile:
-        path: "{{ project_root }}/.env"
-        regexp: "^{{ item.key }}="
-        line: "{{ item.key }}={{ item.value }}"
-        create: yes
-        owner: ubuntu
-        group: ubuntu
-        mode: '0600'
-      loop:
-        - { key: "APP_BASE_URL", value: "https://[{{ inventory_hostname }}]" }
-        - { key: "VITE_APP_URL", value: "https://[{{ inventory_hostname }}]" }
-        - { key: "VITE_API_URL", value: "https://[{{ inventory_hostname }}]/api" }
-        - { key: "VITE_KEYCLOAK_URL", value: "https://[{{ inventory_hostname }}]" }
-        - { key: "CORS_ORIGINS", value: '["https://[{{ inventory_hostname }}]"]' }
-      loop_control:
-        label: "{{ item.key }}"
-
-    - name: APP_BASE_URL aus .env lesen
-      ansible.builtin.shell:
-        cmd: |
-          grep -E '^APP_BASE_URL=' "{{ project_root }}/.env" \
-            | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r'
-        executable: /bin/bash
-      register: app_base_url_raw
-      changed_when: false
-
     # ----------------------------------------------------------------
     # TLS certificate provisioning
     #
     # Two mutually-exclusive paths, selected by whether TLS_DOMAIN is
     # set in the deployed .env:
-    #   - TLS_DOMAIN set    -> ACME/DNS-01 via acme.sh against DHBW's
-    #                          own ACME server (real, browser-trusted
-    #                          cert).
+    #   - TLS_DOMAIN set    -> the app is served at appstore.<TLS_DOMAIN>.
+    #                          ACME/DNS-01 via acme.sh against DHBW's own
+    #                          ACME server (real, browser-trusted cert),
+    #                          and the appstore.<TLS_DOMAIN> AAAA record
+    #                          is kept pointed at the live VM IP.
     #   - TLS_DOMAIN empty  -> self-signed fallback (unchanged from
     #                          before), for IP-only deployments that
     #                          have no DNS name / TSIG key yet.
@@ -104,6 +75,99 @@
             | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r'
         executable: /bin/bash
       register: tls_domain_raw
+      changed_when: false
+
+    - name: TLS_DOMAIN-abhängige DNS/AAAA-Einrichtung
+      when: tls_domain_raw.stdout | trim != ''
+      block:
+        # DNS_TSIG_KEY is the literal BIND ``key "..." { ...; };`` clause,
+        # stored in .env as a properly shell-quoted value (double-quoted,
+        # embedded quotes backslash-escaped) so it also works with the
+        # Makefile's `. ./.env` sourcing. A plain grep/cut (as used for the
+        # simpler vars above) would leave the quoting/escaping in place, so
+        # source the line through bash instead and let it do the unquoting.
+        - name: DNS_TSIG_KEY aus .env lesen
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              line=$(grep -E '^DNS_TSIG_KEY=' "{{ project_root }}/.env" | head -n1 | tr -d '\r')
+              eval "$line"
+              printf '%s' "$DNS_TSIG_KEY"
+            executable: /bin/bash
+          register: dns_tsig_key_raw
+          changed_when: false
+
+        - name: TLS-Variablen setzen
+          ansible.builtin.set_fact:
+            tls_domain: "{{ tls_domain_raw.stdout | trim }}"
+            dns_tsig_key: "{{ dns_tsig_key_raw.stdout | trim }}"
+
+        - name: TSIG-Key-Verzeichnis anlegen
+          ansible.builtin.file:
+            path: /etc/acme-dns
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: tsig.key schreiben
+          ansible.builtin.copy:
+            content: "{{ dns_tsig_key }}\n"
+            dest: /etc/acme-dns/tsig.key
+            owner: root
+            group: root
+            mode: '0600'
+
+        # Keeps appstore.<TLS_DOMAIN>'s AAAA record pointed at this VM's
+        # live IP on every deploy — OpenStack allocates a new IPv6 on VM
+        # recreation, so the record would otherwise silently go stale.
+        - name: AAAA-Record für appstore.<TLS_DOMAIN> aktualisieren
+          ansible.builtin.shell:
+            cmd: |
+              set -euo pipefail
+              nsupdate -k /etc/acme-dns/tsig.key <<EOF
+              server ns.cloud-ns.dhbw-mannheim.de. 53
+              zone {{ tls_domain }}
+              update delete appstore.{{ tls_domain }}. IN AAAA
+              update add appstore.{{ tls_domain }}. 60 IN AAAA {{ inventory_hostname }}
+              send
+              EOF
+            executable: /bin/bash
+          changed_when: true
+
+    # The staging VM's IP is dynamically allocated by OpenStack and can
+    # change between deploys, but APP_BASE_URL/VITE_* in the STAGING_ENV_FILE
+    # secret are static — overwrite them here with the live app origin
+    # (appstore.<TLS_DOMAIN> when a domain is configured, else the raw
+    # ansible_host IP) so the frontend/backend/Keycloak always agree on
+    # where the app is actually reachable.
+    - name: APP_BASE_URL und VITE_* auf aktuellen App-Origin setzen
+      ansible.builtin.lineinfile:
+        path: "{{ project_root }}/.env"
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+        create: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+      vars:
+        app_origin: "{{ ('https://appstore.' + (tls_domain_raw.stdout | trim)) if (tls_domain_raw.stdout | trim != '') else ('https://[' + inventory_hostname + ']') }}"
+      loop:
+        - { key: "APP_BASE_URL", value: "{{ app_origin }}" }
+        - { key: "VITE_APP_URL", value: "{{ app_origin }}" }
+        - { key: "VITE_API_URL", value: "{{ app_origin }}/api" }
+        - { key: "VITE_KEYCLOAK_URL", value: "{{ app_origin }}" }
+        - { key: "CORS_ORIGINS", value: "[\"{{ app_origin }}\"]" }
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: APP_BASE_URL aus .env lesen
+      ansible.builtin.shell:
+        cmd: |
+          grep -E '^APP_BASE_URL=' "{{ project_root }}/.env" \
+            | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r'
+        executable: /bin/bash
+      register: app_base_url_raw
       changed_when: false
 
     - name: Self-signed TLS-Zertifikat generieren (falls nicht vorhanden)
@@ -139,27 +203,11 @@
           register: acme_email_raw
           changed_when: false
 
-        # DNS_TSIG_KEY is the literal BIND ``key "..." { ...; };`` clause,
-        # stored in .env as a properly shell-quoted value (double-quoted,
-        # embedded quotes backslash-escaped) so it also works with the
-        # Makefile's `. ./.env` sourcing. A plain grep/cut (as used for the
-        # simpler vars above) would leave the quoting/escaping in place, so
-        # source the line through bash instead and let it do the unquoting.
-        - name: DNS_TSIG_KEY aus .env lesen
-          ansible.builtin.shell:
-            cmd: |
-              set -e
-              line=$(grep -E '^DNS_TSIG_KEY=' "{{ project_root }}/.env" | head -n1 | tr -d '\r')
-              eval "$line"
-              printf '%s' "$DNS_TSIG_KEY"
-            executable: /bin/bash
-          register: dns_tsig_key_raw
-          changed_when: false
-
+        # tls_domain/dns_tsig_key facts + /etc/acme-dns/tsig.key were
+        # already set up by "TLS_DOMAIN-abhängige DNS/AAAA-Einrichtung"
+        # above (needed earlier for the AAAA-record update too).
         - name: ACME-Variablen setzen
           ansible.builtin.set_fact:
-            tls_domain: "{{ tls_domain_raw.stdout | trim }}"
-            dns_tsig_key: "{{ dns_tsig_key_raw.stdout | trim }}"
             acme_account_email: "{{ acme_email_raw.stdout | trim }}"
 
         - name: acme.sh installiert? prüfen
@@ -174,22 +222,6 @@
               curl -fsSL https://get.acme.sh | sh -s email={{ acme_account_email }}
             executable: /bin/bash
           when: not acme_sh_bin.stat.exists
-
-        - name: TSIG-Key-Verzeichnis anlegen
-          ansible.builtin.file:
-            path: /etc/acme-dns
-            state: directory
-            owner: root
-            group: root
-            mode: '0700'
-
-        - name: tsig.key schreiben
-          ansible.builtin.copy:
-            content: "{{ dns_tsig_key }}\n"
-            dest: /etc/acme-dns/tsig.key
-            owner: root
-            group: root
-            mode: '0600'
 
         - name: ACME-Account beim DHBW-Server registrieren (idempotent)
           ansible.builtin.shell:
@@ -217,8 +249,7 @@
               /root/.acme.sh/acme.sh --issue \
                 --server https://certificates.dhbw.cloud \
                 --dns dns_nsupdate \
-                -d {{ tls_domain }} \
-                -d www.{{ tls_domain }}
+                -d appstore.{{ tls_domain }}
             executable: /bin/bash
           register: acme_issue
           changed_when: "'Cert success' in acme_issue.stdout"
@@ -244,7 +275,7 @@
         - name: Zertifikat nach nginx/certs installieren (inkl. Reload-Hook)
           ansible.builtin.shell:
             cmd: |
-              /root/.acme.sh/acme.sh --install-cert -d {{ tls_domain }} \
+              /root/.acme.sh/acme.sh --install-cert -d appstore.{{ tls_domain }} \
                 --key-file       {{ project_root }}/nginx/certs/key.pem \
                 --fullchain-file {{ project_root }}/nginx/certs/cert.pem \
                 --reloadcmd      "docker exec nginx-prod sh -c 'nginx -t && nginx -s reload'"
@@ -408,6 +439,30 @@
       ansible.builtin.command: docker exec backend-prod python -m alembic upgrade head
       register: migration_result
       changed_when: "'Running upgrade' in migration_result.stdout"
+
+    # Same shape as `make prod-seed` (Makefile): copies the seed script +
+    # app descriptions + realm export into backend-prod and runs it there,
+    # so staging always has working demo users/courses/apps after a
+    # deploy. Idempotent — matches existing users/courses/apps by
+    # email/name instead of duplicating them.
+    - name: Seed-Daten in Backend-Container laden und ausführen
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          admin_user=$(grep -E '^KEYCLOAK_ADMIN_USER=' "{{ project_root }}/.env" | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r')
+          admin_password=$(grep -E '^KEYCLOAK_ADMIN_PASSWORD=' "{{ project_root }}/.env" | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r')
+
+          docker cp "{{ project_root }}/seed/seed_data.py" backend-prod:/tmp/seed_data.py
+          docker cp "{{ project_root }}/seed/app_descriptions" backend-prod:/tmp/app_descriptions
+          docker cp "{{ project_root }}/keycloak/realm-export.json" backend-prod:/tmp/realm-export.json
+
+          docker exec \
+            -e KEYCLOAK_ADMIN_USER="$admin_user" \
+            -e KEYCLOAK_ADMIN_PASSWORD="$admin_password" \
+            -e REALM_EXPORT_PATH=/tmp/realm-export.json \
+            backend-prod python /tmp/seed_data.py
+        executable: /bin/bash
+      changed_when: true
 
     # Safety net for nginx.conf changes that the config_hash label
     # would normally catch — if the label-based recreate didn't fire
