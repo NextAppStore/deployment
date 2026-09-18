@@ -63,16 +63,38 @@
       register: app_base_url_raw
       changed_when: false
 
+    # ----------------------------------------------------------------
+    # TLS certificate provisioning
+    #
+    # Two mutually-exclusive paths, selected by whether TLS_DOMAIN is
+    # set in the deployed .env:
+    #   - TLS_DOMAIN set    -> ACME/DNS-01 via acme.sh against DHBW's
+    #                          own ACME server (real, browser-trusted
+    #                          cert).
+    #   - TLS_DOMAIN empty  -> self-signed fallback (unchanged from
+    #                          before), for IP-only deployments that
+    #                          have no DNS name / TSIG key yet.
+    # ----------------------------------------------------------------
+    - name: TLS_DOMAIN aus .env lesen
+      ansible.builtin.shell:
+        cmd: |
+          grep -E '^TLS_DOMAIN=' "{{ project_root }}/.env" \
+            | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r'
+        executable: /bin/bash
+      register: tls_domain_raw
+      changed_when: false
+
     - name: Self-signed TLS-Zertifikat generieren (falls nicht vorhanden)
       ansible.builtin.shell:
         cmd: |
+          set -e
           mkdir -p {{ project_root }}/nginx/certs
           if [ ! -f {{ project_root }}/nginx/certs/cert.pem ]; then
             openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
               -keyout {{ project_root }}/nginx/certs/key.pem \
               -out    {{ project_root }}/nginx/certs/cert.pem \
-              -subj "/CN={{ inventory_hostname }}" \
-              -addext "subjectAltName=IP:{{ inventory_hostname }}"
+              -subj "/CN={{ ansible_host }}" \
+              -addext "subjectAltName=IP:{{ ansible_host }}"
             chmod 600 {{ project_root }}/nginx/certs/key.pem
             echo "cert generated"
           else
@@ -81,6 +103,150 @@
         executable: /bin/bash
       register: cert_result
       changed_when: "'cert generated' in cert_result.stdout"
+      when: tls_domain_raw.stdout | trim == ''
+
+    - name: ACME-TLS-Zertifikat via acme.sh besorgen (DNS-01, DHBW ACME-Server)
+      when: tls_domain_raw.stdout | trim != ''
+      block:
+        - name: ACME_ACCOUNT_EMAIL aus .env lesen
+          ansible.builtin.shell:
+            cmd: |
+              grep -E '^ACME_ACCOUNT_EMAIL=' "{{ project_root }}/.env" \
+                | head -n1 | cut -d= -f2- | tr -d '"'"'"'\r'
+            executable: /bin/bash
+          register: acme_email_raw
+          changed_when: false
+
+        # DNS_TSIG_KEY is the literal BIND ``key "..." { ...; };`` clause,
+        # stored in .env as a properly shell-quoted value (double-quoted,
+        # embedded quotes backslash-escaped) so it also works with the
+        # Makefile's `. ./.env` sourcing. A plain grep/cut (as used for the
+        # simpler vars above) would leave the quoting/escaping in place, so
+        # source the line through bash instead and let it do the unquoting.
+        - name: DNS_TSIG_KEY aus .env lesen
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              line=$(grep -E '^DNS_TSIG_KEY=' "{{ project_root }}/.env" | head -n1 | tr -d '\r')
+              eval "$line"
+              printf '%s' "$DNS_TSIG_KEY"
+            executable: /bin/bash
+          register: dns_tsig_key_raw
+          changed_when: false
+
+        - name: ACME-Variablen setzen
+          ansible.builtin.set_fact:
+            tls_domain: "{{ tls_domain_raw.stdout | trim }}"
+            dns_tsig_key: "{{ dns_tsig_key_raw.stdout | trim }}"
+            acme_account_email: "{{ acme_email_raw.stdout | trim }}"
+
+        - name: acme.sh installiert? prüfen
+          ansible.builtin.stat:
+            path: /root/.acme.sh/acme.sh
+          register: acme_sh_bin
+
+        - name: acme.sh installieren (idempotent)
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              curl -fsSL https://get.acme.sh | sh -s email={{ acme_account_email }}
+            executable: /bin/bash
+          when: not acme_sh_bin.stat.exists
+
+        - name: TSIG-Key-Verzeichnis anlegen
+          ansible.builtin.file:
+            path: /etc/acme-dns
+            state: directory
+            owner: root
+            group: root
+            mode: '0700'
+
+        - name: tsig.key schreiben
+          ansible.builtin.copy:
+            content: "{{ dns_tsig_key }}\n"
+            dest: /etc/acme-dns/tsig.key
+            owner: root
+            group: root
+            mode: '0600'
+
+        - name: ACME-Account beim DHBW-Server registrieren (idempotent)
+          ansible.builtin.shell:
+            cmd: |
+              /root/.acme.sh/acme.sh --register-account \
+                --server https://certificates.dhbw.cloud \
+                -m {{ acme_account_email }}
+            executable: /bin/bash
+          register: acme_register
+          changed_when: "'Registering account' in acme_register.stdout"
+          failed_when: acme_register.rc != 0 and 'already registered' not in acme_register.stdout
+
+        # acme.sh tracks issuance/renewal state itself (~/.acme.sh/<domain>/),
+        # so call --issue unconditionally every run rather than
+        # reimplementing that check via file existence. When a cert already
+        # exists and isn't due for renewal yet, acme.sh prints "Skipping"
+        # and exits 2 — that's the expected steady-state outcome, not a
+        # failure; only other non-zero exit codes are real errors.
+        - name: Zertifikat ausstellen / erneuern (acme.sh entscheidet selbst ob nötig)
+          ansible.builtin.shell:
+            cmd: |
+              export NSUPDATE_SERVER="ns.cloud-ns.dhbw-mannheim.de."
+              export NSUPDATE_SERVER_PORT="53"
+              export NSUPDATE_KEY="/etc/acme-dns/tsig.key"
+              /root/.acme.sh/acme.sh --issue \
+                --server https://certificates.dhbw.cloud \
+                --dns dns_nsupdate \
+                -d {{ tls_domain }} \
+                -d www.{{ tls_domain }}
+            executable: /bin/bash
+          register: acme_issue
+          changed_when: "'Cert success' in acme_issue.stdout"
+          failed_when: acme_issue.rc not in [0, 2]
+
+        - name: Verzeichnis nginx/certs anlegen
+          ansible.builtin.file:
+            path: "{{ project_root }}/nginx/certs"
+            state: directory
+            owner: ubuntu
+            group: ubuntu
+            mode: '0700'
+
+        # The --reloadcmd's ``nginx -s reload`` can fail here on a VM
+        # where nginx/certs previously had no content (or a different
+        # bind-mount source) at container-start time — a bind mount
+        # doesn't get remounted just because new files appear on the
+        # host, so the running container still sees the old (possibly
+        # empty) directory. install-cert itself always writes the files
+        # to the host path correctly; only the live reload can lag, so
+        # failure here is tolerated and caught by the unconditional
+        # restart fallback below.
+        - name: Zertifikat nach nginx/certs installieren (inkl. Reload-Hook)
+          ansible.builtin.shell:
+            cmd: |
+              /root/.acme.sh/acme.sh --install-cert -d {{ tls_domain }} \
+                --key-file       {{ project_root }}/nginx/certs/key.pem \
+                --fullchain-file {{ project_root }}/nginx/certs/cert.pem \
+                --reloadcmd      "docker exec nginx-prod sh -c 'nginx -t && nginx -s reload'"
+            executable: /bin/bash
+          register: acme_install
+          changed_when: true
+          failed_when: false
+
+        - name: nginx-prod neu starten, falls Reload nach Zertifikatsinstallation fehlschlug
+          ansible.builtin.shell:
+            cmd: docker exec nginx-prod sh -c 'nginx -t' || docker restart nginx-prod
+            executable: /bin/bash
+          register: nginx_cert_restart
+          changed_when: "'nginx-prod' in nginx_cert_restart.stdout"
+
+        - name: Berechtigungen auf installiertes Zertifikat setzen
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            owner: ubuntu
+            group: ubuntu
+            mode: "{{ item.mode }}"
+          loop:
+            - { path: "{{ project_root }}/nginx/certs/key.pem", mode: '0600' }
+            - { path: "{{ project_root }}/nginx/certs/cert.pem", mode: '0644' }
 
     - name: Keycloak realm-export.json aus Template rendern
       ansible.builtin.template:
@@ -132,7 +298,7 @@
 
     - name: Pull alle Images
       ansible.builtin.shell:
-        cmd: docker compose -f docker-compose.staging.yml pull
+        cmd: docker compose --env-file "{{ project_root }}/.env" -f docker-compose.staging.yml pull
         chdir: "{{ project_root }}"
       changed_when: true
       async: 600
