@@ -233,10 +233,15 @@
 
         - name: nginx-prod neu starten, falls Reload nach Zertifikatsinstallation fehlschlug
           ansible.builtin.shell:
-            cmd: docker exec nginx-prod sh -c 'nginx -t' || docker restart nginx-prod
+            cmd: |
+              if docker inspect nginx-prod >/dev/null 2>&1; then
+                docker exec nginx-prod sh -c 'nginx -t' || docker restart nginx-prod
+              else
+                echo "nginx-prod does not exist yet, skipping (first deploy)"
+              fi
             executable: /bin/bash
           register: nginx_cert_restart
-          changed_when: "'nginx-prod' in nginx_cert_restart.stdout"
+          changed_when: "'nginx-prod' in nginx_cert_restart.stdout and 'does not exist yet' not in nginx_cert_restart.stdout"
 
         - name: Berechtigungen auf installiertes Zertifikat setzen
           ansible.builtin.file:
