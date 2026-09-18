@@ -72,6 +72,7 @@
         - { key: "VITE_APP_URL", value: "https://[{{ inventory_hostname }}]" }
         - { key: "VITE_API_URL", value: "https://[{{ inventory_hostname }}]/api" }
         - { key: "VITE_KEYCLOAK_URL", value: "https://[{{ inventory_hostname }}]" }
+        - { key: "CORS_ORIGINS", value: '["https://[{{ inventory_hostname }}]"]' }
       loop_control:
         label: "{{ item.key }}"
 
