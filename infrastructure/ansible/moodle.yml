@@ -310,6 +310,38 @@
             dest: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
             remote_src: yes
 
+    # config.docker-template.php ist ein reines Lokal-Dev-Template: es baut
+    # $CFG->wwwroot immer als "http://<MOODLE_DOCKER_WEB_HOST>:<MOODLE_DOCKER_WEB_PORT>"
+    # (siehe "Docker deployment"-Zweig des Templates) und kennt kein "hinter
+    # TLS-terminierendem Reverse-Proxy auf Standard-Port" Szenario. Ohne diesen
+    # Patch verweist jeder Moodle-Redirect auf http://moodle.<domain>:8000/ —
+    # von aussen unerreichbar (nur 80/443 sind offen), was wie ein endloses
+    # Laden/Timeout aussieht. Läuft unconditional (nicht nur bei Neuerstellung),
+    # damit auch ein schon bestehendes config.php korrigiert wird.
+    #
+    # Ersetzt gezielt nur die "Docker deployment"-Zweig-Zeile (mit führendem
+    # Whitespace, da das Template mit 4 Leerzeichen einrückt) sowie die separate
+    # ".= \":{$port}\"" Port-Anhänge-Zeile, damit der Gitpod-Zweig unangetastet
+    # bleibt.
+    - name: wwwroot (Docker-Zweig) in config.php auf öffentliche HTTPS-Domain korrigieren
+      ansible.builtin.replace:
+        path: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
+        regexp: "^\\s*\\$CFG->wwwroot\\s*=\\s*\"http://\\{\\$host\\}\";$"
+        replace: "    $CFG->wwwroot   = 'https://{{ moodle_domain }}';"
+
+    - name: Port-Anhänge-Zeile an wwwroot entfernen
+      ansible.builtin.replace:
+        path: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
+        regexp: "^\\s*\\$CFG->wwwroot\\s*\\.=\\s*\":\\{\\$port\\}\";$"
+        replace: "    // wwwroot port suffix removed by Ansible (public HTTPS domain has no port)"
+
+    - name: sslproxy in config.php setzen (TLS wird von nginx terminiert)
+      ansible.builtin.lineinfile:
+        path: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
+        insertafter: "^\\s*// Docker deployment\\.$"
+        regexp: "^\\s*\\$CFG->sslproxy\\s*="
+        line: "    $CFG->sslproxy = true;"
+
     # Startet die Moodle-Container (start.sh Schritt 5). MOODLE_DOCKER_WEB_HOST
     # wird auf die echte Domain gesetzt statt auf "localhost" (start.sh-Default),
     # damit Moodles eigene Site-Konfiguration zur öffentlichen Domain passt.
