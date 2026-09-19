@@ -399,6 +399,20 @@
       changed_when: false
       failed_when: false
 
+    - name: Diagnose - sites-enabled Verzeichnis
+      ansible.builtin.command: ls -la /etc/nginx/sites-enabled/
+      register: sites_enabled_status
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - effektive nginx-Konfiguration (server-Blöcke)
+      ansible.builtin.shell:
+        cmd: nginx -T 2>&1 | grep -B2 -A15 "listen.*443\|server_name"
+        executable: /bin/bash
+      register: nginx_effective_config
+      changed_when: false
+      failed_when: false
+
     - name: Diagnose-Ausgabe anzeigen
       ansible.builtin.debug:
         msg:
@@ -406,5 +420,9 @@
           - "{{ ufw_status.stdout_lines | default(['(failed: ' + (ufw_status.stderr | default('unknown')) + ')']) }}"
           - "=== iptables -L -n -v ==="
           - "{{ iptables_status.stdout_lines | default(['(failed)']) }}"
+          - "=== sites-enabled ==="
+          - "{{ sites_enabled_status.stdout_lines | default(['(failed)']) }}"
+          - "=== nginx -T (443/server_name blocks) ==="
+          - "{{ nginx_effective_config.stdout_lines | default(['(failed)']) }}"
           - "=== ss -tlnp ==="
           - "{{ ss_status.stdout_lines | default(['(failed)']) }}"

@@ -3,12 +3,14 @@
 
 server {
     listen 80;
+    listen [::]:80;
     server_name {{ moodle_domain }};
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
+    listen [::]:443 ssl;
     server_name {{ moodle_domain }};
 
     ssl_certificate     /etc/nginx/certs/moodle/cert.pem;
