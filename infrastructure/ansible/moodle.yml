@@ -377,7 +377,7 @@
     - name: Prüfen ob Moodle-Datenbank bereits initialisiert ist
       ansible.builtin.shell:
         cmd: |
-          docker exec moodle-docker-db-1 psql -U moodle -d moodle -t \
+          timeout 20 docker exec moodle-docker-db-1 psql -U moodle -d moodle -t \
             -c "SELECT to_regclass('public.m_course');" 2>/dev/null | tr -d '[:space:]'
         executable: /bin/bash
       register: moodle_db_initialized
@@ -400,9 +400,14 @@
     # Config/Redirect-Verhalten — ohne Purge nach einer config.php-Änderung
     # kann ein zuvor falsches wwwroot (z.B. mit :8000-Suffix) zu einer
     # Redirect-Schleife führen, obwohl config.php inzwischen korrekt ist.
+    #
+    # `timeout 60` als harte Wanduhr-Grenze: PHP kann bei einem defekten
+    # wwwroot/Session-Zustand hier unbegrenzt hängen bleiben (beobachtet:
+    # >15 Minuten ohne Ende) und damit den self-hosted Runner blockieren.
     - name: Moodle-Caches leeren
-      ansible.builtin.command: docker exec moodle-docker-webserver-1 php admin/cli/purge_caches.php
+      ansible.builtin.command: timeout 60 docker exec moodle-docker-webserver-1 php admin/cli/purge_caches.php
       changed_when: true
+      failed_when: false
 
     - name: Status der Moodle-Container anzeigen
       ansible.builtin.command: docker ps --filter "name=moodle-docker"
@@ -461,7 +466,7 @@
     - name: Diagnose - wwwroot in mdl_config (DB)
       ansible.builtin.shell:
         cmd: |
-          docker exec moodle-docker-db-1 psql -U moodle -d moodle -t \
+          timeout 20 docker exec moodle-docker-db-1 psql -U moodle -d moodle -t \
             -c "SELECT name, value FROM m_config WHERE name IN ('wwwroot','sessioncookie','sessioncookiepath','cookiesecure','cookiehttponly');"
         executable: /bin/bash
       register: mdl_config_diag
@@ -470,7 +475,7 @@
 
     - name: Diagnose - Apache error.log (letzte 50 Zeilen)
       ansible.builtin.shell:
-        cmd: docker exec moodle-docker-webserver-1 tail -50 /var/log/apache2/error.log
+        cmd: timeout 20 docker exec moodle-docker-webserver-1 tail -50 /var/log/apache2/error.log
         executable: /bin/bash
       register: apache_error_diag
       changed_when: false
