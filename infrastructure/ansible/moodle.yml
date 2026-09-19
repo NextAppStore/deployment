@@ -450,6 +450,58 @@
       changed_when: false
       failed_when: false
 
+    - name: Diagnose - deployed config.php (wwwroot/sslproxy)
+      ansible.builtin.shell:
+        cmd: grep -n "wwwroot\|sslproxy\|reverseproxy" "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
+        executable: /bin/bash
+      register: config_php_diag
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - wwwroot in mdl_config (DB)
+      ansible.builtin.shell:
+        cmd: |
+          docker exec moodle-docker-db-1 psql -U moodle -d moodle -t \
+            -c "SELECT name, value FROM m_config WHERE name IN ('wwwroot','sessioncookie','sessioncookiepath','cookiesecure','cookiehttponly');"
+        executable: /bin/bash
+      register: mdl_config_diag
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - Apache error.log (letzte 50 Zeilen)
+      ansible.builtin.shell:
+        cmd: docker exec moodle-docker-webserver-1 tail -50 /var/log/apache2/error.log
+        executable: /bin/bash
+      register: apache_error_diag
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - VM-Ressourcen (Speicher, Load)
+      ansible.builtin.shell:
+        cmd: free -h && echo '---' && uptime && echo '---' && df -h /
+        executable: /bin/bash
+      register: resource_diag
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - lokaler curl gegen webserver-Container (127.0.0.1:8000)
+      ansible.builtin.shell:
+        cmd: |
+          curl -s -o /dev/null -w 'http_code=%{http_code} time_total=%{time_total}s redirect_url=%{redirect_url}\n' --max-time 15 http://127.0.0.1:8000/
+        executable: /bin/bash
+      register: local_curl_diag
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - lokaler curl gegen nginx (localhost:443)
+      ansible.builtin.shell:
+        cmd: |
+          curl -sk -o /dev/null -w 'http_code=%{http_code} time_total=%{time_total}s redirect_url=%{redirect_url}\n' --max-time 15 -H "Host: {{ moodle_domain }}" https://127.0.0.1:443/
+        executable: /bin/bash
+      register: local_nginx_curl_diag
+      changed_when: false
+      failed_when: false
+
     - name: Diagnose-Ausgabe anzeigen
       ansible.builtin.debug:
         msg:
@@ -461,5 +513,17 @@
           - "{{ sites_enabled_status.stdout_lines | default(['(failed)']) }}"
           - "=== nginx -T (443/server_name blocks) ==="
           - "{{ nginx_effective_config.stdout_lines | default(['(failed)']) }}"
+          - "=== deployed config.php (wwwroot/sslproxy/reverseproxy) ==="
+          - "{{ config_php_diag.stdout_lines | default(['(failed)']) }}"
+          - "=== mdl_config (wwwroot/session/cookie settings in DB) ==="
+          - "{{ mdl_config_diag.stdout_lines | default(['(failed)']) }}"
+          - "=== Apache error.log (last 50 lines) ==="
+          - "{{ apache_error_diag.stdout_lines | default(['(failed)']) }}"
+          - "=== VM resources ==="
+          - "{{ resource_diag.stdout_lines | default(['(failed)']) }}"
+          - "=== local curl -> webserver container (127.0.0.1:8000) ==="
+          - "{{ local_curl_diag.stdout_lines | default(['(failed: ' + (local_curl_diag.stderr | default('unknown')) + ')']) }}"
+          - "=== local curl -> nginx (127.0.0.1:443, Host header set) ==="
+          - "{{ local_nginx_curl_diag.stdout_lines | default(['(failed: ' + (local_nginx_curl_diag.stderr | default('unknown')) + ')']) }}"
           - "=== ss -tlnp ==="
           - "{{ ss_status.stdout_lines | default(['(failed)']) }}"
