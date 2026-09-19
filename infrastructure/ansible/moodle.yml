@@ -395,9 +395,14 @@
             executable: /bin/bash
           changed_when: true
 
-        - name: Moodle-Caches leeren
-          ansible.builtin.command: docker exec moodle-docker-webserver-1 php admin/cli/purge_caches.php
-          changed_when: true
+    # Unconditional (nicht nur beim Seed-Import): config.php wird bei jedem
+    # Lauf durch die wwwroot/sslproxy-Tasks oben gepatcht, und Moodle cached
+    # Config/Redirect-Verhalten — ohne Purge nach einer config.php-Änderung
+    # kann ein zuvor falsches wwwroot (z.B. mit :8000-Suffix) zu einer
+    # Redirect-Schleife führen, obwohl config.php inzwischen korrekt ist.
+    - name: Moodle-Caches leeren
+      ansible.builtin.command: docker exec moodle-docker-webserver-1 php admin/cli/purge_caches.php
+      changed_when: true
 
     - name: Status der Moodle-Container anzeigen
       ansible.builtin.command: docker ps --filter "name=moodle-docker"
