@@ -335,12 +335,18 @@
         regexp: "^\\s*\\$CFG->wwwroot\\s*\\.=\\s*\":\\{\\$port\\}\";$"
         replace: "    // wwwroot port suffix removed by Ansible (public HTTPS domain has no port)"
 
+    # ansible.builtin.lineinfile wurde hier bewusst NICHT verwendet: dessen
+    # `regexp` sucht über die GESAMTE Datei, nicht nur nahe `insertafter` —
+    # das Template hat im Gitpod-Zweig bereits eine (andere) "$CFG->sslproxy
+    # = true;"-Zeile, die fälschlich als "schon vorhanden" erkannt wurde und
+    # die Einfügung im Docker-Zweig stillschweigend verhindert hat (beobachtet:
+    # sslproxy fehlte im deployten config.php trotz "ok"-Status). `replace`
+    # auf den eindeutigen "// Docker deployment."-Anker vermeidet das.
     - name: sslproxy in config.php setzen (TLS wird von nginx terminiert)
-      ansible.builtin.lineinfile:
+      ansible.builtin.replace:
         path: "{{ project_root }}/DevMoodle/moodle-docker/moodle-src/config.php"
-        insertafter: "^\\s*// Docker deployment\\.$"
-        regexp: "^\\s*\\$CFG->sslproxy\\s*="
-        line: "    $CFG->sslproxy = true;"
+        regexp: "^(\\s*)// Docker deployment\\.\\n(?!\\s*\\$CFG->sslproxy\\s*=)"
+        replace: "\\1// Docker deployment.\\n\\1$CFG->sslproxy = true;\\n"
 
     # Startet die Moodle-Container (start.sh Schritt 5). MOODLE_DOCKER_WEB_HOST
     # wird auf die echte Domain gesetzt statt auf "localhost" (start.sh-Default),
