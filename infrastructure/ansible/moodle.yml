@@ -401,11 +401,51 @@
             executable: /bin/bash
           changed_when: true
 
+    # LTI-Tool (Seed-Daten aus start.sh-Workflow) zeigt standardmäßig auf eine
+    # lokale ngrok-Tunnel-URL von DevMoodles LTI-Mock-Server (dev-only, längst
+    # abgelaufen). Zeigt stattdessen auf die App-Store-Staging-Instanz, deren
+    # LTI-Endpunkte unter /api/lti/launch bzw. /api/lti/login liegen (nginx
+    # strippt /api/, Backend-Router ist unter /lti gemounted — siehe
+    # backend/app/main.py: app.include_router(auth_lti.router, prefix="/lti")).
+    # Selbe Update-Logik wie DevMoodle/set-lti-url.sh, nur unconditional bei
+    # jedem Deploy statt manuell. Nur wenn TLS_DOMAIN gesetzt ist (sonst gibt
+    # es keine erreichbare App-Store-Domain, auf die verwiesen werden könnte).
+    - name: App-Store-URL für LTI-Tool ermitteln
+      ansible.builtin.set_fact:
+        appstore_lti_base_url: "https://appstore.{{ tls_domain_raw.stdout | trim }}"
+      when: tls_domain_raw.stdout | trim != ''
+
+    - name: LTI-Tool auf App-Store-Instanz umstellen
+      when: tls_domain_raw.stdout | trim != ''
+      ansible.builtin.shell:
+        cmd: |
+          timeout 20 docker exec -i moodle-docker-db-1 psql -U moodle -d moodle >/dev/null <<'EOSQL'
+          UPDATE m_lti_types
+          SET baseurl = '{{ appstore_lti_base_url }}/api/lti/launch', tooldomain = 'appstore.{{ tls_domain_raw.stdout | trim }}'
+          WHERE id = 1;
+
+          UPDATE m_lti_types_config
+          SET value = '{{ appstore_lti_base_url }}/api/lti/launch'
+          WHERE typeid = 1 AND name = 'publickeyset';
+
+          UPDATE m_lti_types_config
+          SET value = '{{ appstore_lti_base_url }}/api/lti/login'
+          WHERE typeid = 1 AND name = 'initiatelogin';
+
+          UPDATE m_lti_types_config
+          SET value = '{{ appstore_lti_base_url }}/api/lti/launch'
+          WHERE typeid = 1 AND name = 'redirectionuris';
+          EOSQL
+        executable: /bin/bash
+      changed_when: true
+
     # Unconditional (nicht nur beim Seed-Import): config.php wird bei jedem
     # Lauf durch die wwwroot/sslproxy-Tasks oben gepatcht, und Moodle cached
     # Config/Redirect-Verhalten — ohne Purge nach einer config.php-Änderung
     # kann ein zuvor falsches wwwroot (z.B. mit :8000-Suffix) zu einer
     # Redirect-Schleife führen, obwohl config.php inzwischen korrekt ist.
+    # Läuft auch nach der LTI-URL-Aktualisierung, damit gecachte LTI-
+    # Konfiguration nicht die neuen Werte verdeckt.
     #
     # `timeout 60` als harte Wanduhr-Grenze: PHP kann bei einem defekten
     # wwwroot/Session-Zustand hier unbegrenzt hängen bleiben (beobachtet:
