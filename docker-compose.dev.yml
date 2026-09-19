@@ -226,6 +226,12 @@ services:
       LTI_DEPLOYMENT_ID: ${LTI_DEPLOYMENT_ID:-}
       LTI_SESSION_SECRET: ${LTI_SESSION_SECRET:-}
 
+      # Public URL of this API, used to build the LTI redirect_uri sent
+      # to Moodle. In dev the backend is reachable directly on
+      # localhost:8000 (no /api-stripping proxy in front of it like
+      # staging/prod), matching the Settings default.
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:8000}
+
       # CORS
       CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]}'
 

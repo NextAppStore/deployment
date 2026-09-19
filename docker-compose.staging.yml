@@ -280,6 +280,14 @@ services:
       LTI_DEPLOYMENT_ID: ${LTI_DEPLOYMENT_ID:-}
       LTI_SESSION_SECRET: ${LTI_SESSION_SECRET:-}
 
+      # Public URL of this API as seen from the outside, including the
+      # "/api" prefix the nginx reverse proxy strips before forwarding
+      # here (see deployment/nginx/nginx.conf). Needed to build the LTI
+      # redirect_uri sent to Moodle — it must exactly match the
+      # Redirection URI registered on Moodle's External Tool config, and
+      # request.base_url can't see the stripped "/api" prefix.
+      API_BASE_URL: ${API_BASE_URL:-}
+
       # Application
       DEBUG: "False"
       APP_NAME: ${APP_NAME:-Backend API}
