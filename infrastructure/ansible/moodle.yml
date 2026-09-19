@@ -375,3 +375,36 @@
     - name: Status anzeigen
       ansible.builtin.debug:
         var: moodle_ps.stdout_lines
+
+    # Diagnose: OpenStack security group rules + port attachment are
+    # confirmed correct (443/IPv6 open, group attached to the VM), so if
+    # external connections still time out the remaining suspect is a
+    # host-level firewall on the VM itself blocking the port before nginx
+    # ever sees the packet.
+    - name: Diagnose - ufw Status
+      ansible.builtin.command: ufw status verbose
+      register: ufw_status
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - iptables Regeln
+      ansible.builtin.command: iptables -L -n -v
+      register: iptables_status
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose - nginx Listen-Sockets
+      ansible.builtin.command: ss -tlnp
+      register: ss_status
+      changed_when: false
+      failed_when: false
+
+    - name: Diagnose-Ausgabe anzeigen
+      ansible.builtin.debug:
+        msg:
+          - "=== ufw status verbose ==="
+          - "{{ ufw_status.stdout_lines | default(['(failed: ' + (ufw_status.stderr | default('unknown')) + ')']) }}"
+          - "=== iptables -L -n -v ==="
+          - "{{ iptables_status.stdout_lines | default(['(failed)']) }}"
+          - "=== ss -tlnp ==="
+          - "{{ ss_status.stdout_lines | default(['(failed)']) }}"
