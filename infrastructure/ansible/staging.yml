@@ -9,6 +9,17 @@
     docker_install_compose: true
     project_root: "/home/ubuntu/app"
     local_compose_path: "{{ playbook_dir }}/../../"
+    # Some LTI/OIDC platforms we integrate with (e.g. the DHBW Moodle
+    # instance) are IPv6-only — no A record at all — but Docker bridge
+    # networks default to IPv4-only. The VM itself gets a single global
+    # IPv6 /128 from OpenStack (no routable prefix to delegate to
+    # containers), so NAT66 — a private ULA range masqueraded through
+    # that one host address — is the only workable model, mirroring how
+    # IPv4 container egress already works via iptables MASQUERADE.
+    docker_daemon_options:
+      ipv6: true
+      fixed-cidr-v6: "fd00:dead:beef::/48"
+      ip6tables: true
 
   pre_tasks:
     - name: Verzeichnis für App erstellen
@@ -18,6 +29,32 @@
         owner: ubuntu
         group: ubuntu
         mode: '0755'
+
+    # MUST run before "IPv6 forwarding aktivieren" below. Enabling
+    # net.ipv6.conf.all.forwarding makes the kernel silently stop
+    # accepting Router Advertisements on every interface (a well-known
+    # Linux/Docker gotcha: https://github.com/docker/for-linux/issues/1373
+    # — "Docker sets forward=1 but not accept_ra=2"). This VM's public
+    # IPv6 address and default route are entirely RA-driven (SLAAC via
+    # the DHBWV6 OpenStack network, no floating IP), so without this,
+    # enabling forwarding silently breaks external HTTPS reachability —
+    # confirmed by a live outage during initial rollout. accept_ra=2
+    # keeps RAs being processed even with forwarding on.
+    - name: IPv6 Router Advertisements trotz Forwarding weiter akzeptieren (ens3)
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.ens3.accept_ra
+        value: '2'
+        sysctl_set: yes
+        state: present
+        reload: yes
+
+    - name: IPv6 forwarding aktivieren (für Docker NAT66)
+      ansible.posix.sysctl:
+        name: net.ipv6.conf.all.forwarding
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
 
   roles:
     - role: geerlingguy.docker

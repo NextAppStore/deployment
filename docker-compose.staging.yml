@@ -317,6 +317,10 @@ services:
     networks:
       - frontend-network
       - backend-network
+      # Dedicated network so LTI platform calls (e.g. Moodle, which is
+      # IPv6-only — no A record) get IPv6 egress without touching
+      # backend-network, which nginx/frontend/keycloak also share.
+      - lti-egress-network
     restart: unless-stopped
     deploy:
       resources:
@@ -493,6 +497,24 @@ networks:
   backend-network:
     driver: bridge
     name: backend-network-prod
+  # Dedicated to backend-prod only (see its `networks:` list above) so
+  # IPv6-only LTI platforms like Moodle are reachable without enabling
+  # IPv6 on backend-network, which nginx/frontend/keycloak also share —
+  # doing that broke nginx's externally-published ports (it has no
+  # `listen [::]` directives, so it only ever worked over IPv6 by
+  # accident of IPv4-mapped-IPv6 socket behavior against an IPv4-only
+  # bridge). Requires docker_daemon_options (ipv6/fixed-cidr-v6/ip6tables)
+  # set in infrastructure/ansible/staging.yml for the NAT66 masquerading.
+  # Subnet is explicit and must stay disjoint from the daemon's
+  # fixed-cidr-v6 pool (fd00:dead:beef::/48), which Docker's default
+  # `bridge` network auto-claims once IPv6 is enabled at the daemon level.
+  lti-egress-network:
+    driver: bridge
+    name: lti-egress-network-prod
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "fd00:cafe:babe::/64"
   worker-network:
     driver: bridge
     name: worker-network-prod
