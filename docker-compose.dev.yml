@@ -225,6 +225,9 @@ services:
       LTI_CLIENT_ID: ${LTI_CLIENT_ID:-}
       LTI_DEPLOYMENT_ID: ${LTI_DEPLOYMENT_ID:-}
       LTI_SESSION_SECRET: ${LTI_SESSION_SECRET:-}
+      # Shared OIDC state/nonce store (see app/utils/lti_auth.py) — same
+      # redis service Celery uses, different DB index (db 1 vs. db 0).
+      LTI_NONCE_REDIS_URL: ${LTI_NONCE_REDIS_URL:-redis://redis:6379/1}
 
       # Public URL of this API, used to build the LTI redirect_uri sent
       # to Moodle. In dev the backend is reachable directly on

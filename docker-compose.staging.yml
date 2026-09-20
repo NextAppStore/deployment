@@ -279,6 +279,11 @@ services:
       LTI_CLIENT_ID: ${LTI_CLIENT_ID:-}
       LTI_DEPLOYMENT_ID: ${LTI_DEPLOYMENT_ID:-}
       LTI_SESSION_SECRET: ${LTI_SESSION_SECRET:-}
+      # Shared OIDC state/nonce store (see app/utils/lti_auth.py) — reuses
+      # the redis service Celery already talks to, on a different DB
+      # index (db 1, vs. CELERY_RESULT_BACKEND's db 0) so the two never
+      # collide.
+      LTI_NONCE_REDIS_URL: ${LTI_NONCE_REDIS_URL:-redis://redis:6379/1}
 
       # Public URL of this API as seen from the outside, including the
       # "/api" prefix the nginx reverse proxy strips before forwarding
