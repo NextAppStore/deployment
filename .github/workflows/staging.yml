@@ -21,14 +21,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
         with:
-          terraform_wrapper: false
+          tofu_wrapper: false
 
-      - name: Terraform Format Check
+      - name: OpenTofu Format Check
         working-directory: infrastructure/terraform
-        run: terraform fmt -check -recursive
+        run: tofu fmt -check -recursive
 
       - name: Install Trivy
         run: |
@@ -65,21 +65,21 @@ jobs:
           # keeps the key out of the rendered script text.
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/openstack-key
           chmod 600 ~/.ssh/openstack-key
-          # Derive the matching public key and hand it to Terraform so the
+          # Derive the matching public key and hand it to OpenTofu so the
           # OpenStack keypair always matches this private key.
           # -P '' forces an empty passphrase: passphrase-protected keys fail
           # fast with a clear error instead of hanging on /dev/tty in CI.
           ssh-keygen -y -P '' -f ~/.ssh/openstack-key > ~/.ssh/openstack-key.pub
           echo "TF_VAR_ssh_public_key=$(cat ~/.ssh/openstack-key.pub)" >> "$GITHUB_ENV"
 
-      - name: Terraform Init, Validate, Plan & Apply
+      - name: OpenTofu Init, Validate, Plan & Apply
         working-directory: infrastructure/terraform/envs/staging
         run: |
-          terraform init
-          terraform validate
-          terraform plan -out=tfplan
-          terraform apply tfplan
-          echo "VM_IP=$(terraform output -raw vm_ip)" >> "$GITHUB_ENV"
+          tofu init
+          tofu validate
+          tofu plan -out=tfplan
+          tofu apply tfplan
+          echo "VM_IP=$(tofu output -raw vm_ip)" >> "$GITHUB_ENV"
 
       - name: Install Ansible and Dependencies
         run: |
