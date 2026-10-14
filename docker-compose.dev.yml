@@ -423,7 +423,7 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: fd00:dev:worker::/64
+        - subnet: "fd00:dede:1000::/64"
   keycloak-network:
     driver: bridge
     name: keycloak-network-dev
