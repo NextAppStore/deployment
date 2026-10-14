@@ -520,9 +520,19 @@ networks:
     ipam:
       config:
         - subnet: "fd00:cafe:babe::/64"
+  # IPv6 required: Packer forces ssh_ip_version=6 against DHBWV6 OpenStack
+  # instances (see Ubuntu-App/packer/template.pkr.hcl) because the DHBWV6
+  # network only grants a routable v6 address, not a usable v4 route to
+  # container-run tooling. Same NAT66 model as lti-egress-network above —
+  # subnet must stay disjoint from the daemon's fixed-cidr-v6 pool
+  # (fd00:dead:beef::/48) and from lti-egress-network's fd00:cafe:babe::/64.
   worker-network:
     driver: bridge
     name: worker-network-prod
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "fd00:f00d:feed::/64"
   keycloak-network:
     driver: bridge
     name: keycloak-network-prod
