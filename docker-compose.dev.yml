@@ -414,6 +414,16 @@ networks:
   worker-network:
     driver: bridge
     name: worker-network-dev
+    # IPv6 required: Packer forces ssh_ip_version=6 against DHBWV6
+    # (see Ubuntu-App/packer/template.pkr.hcl) because the DHBW VPN only
+    # routes v6 to OpenStack instances. A default bridge network is v4-only,
+    # so without this the worker's Packer/Terraform runs fail with
+    # "network is unreachable" dialing the target VM's IPv6 address.
+    enable_ipv6: true
+    ipam:
+      driver: default
+      config:
+        - subnet: "fd00:dede:1000::/64"
   keycloak-network:
     driver: bridge
     name: keycloak-network-dev
