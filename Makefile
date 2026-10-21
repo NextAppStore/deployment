@@ -42,7 +42,6 @@ DOCKER_CP := $(DOCKER) cp
 FRONTEND_PORT_DEV  ?= 5173
 BACKEND_PORT       ?= 8000
 KEYCLOAK_PORT      ?= 8080
-RABBITMQ_UI_PORT   ?= 15672
 PGADMIN_PORT       ?= 5050
 
 .DEFAULT_GOAL := help
@@ -54,7 +53,7 @@ PGADMIN_PORT       ?= 5050
         dev-logs dev-logs-backend dev-logs-frontend dev-logs-worker dev-logs-keycloak \
         dev-build dev-build-backend dev-build-frontend dev-build-worker dev-rebuild dev-ps \
         shell-backend shell-worker shell-frontend \
-        shell-db shell-redis shell-keycloak shell-keycloak-db \
+        shell-db shell-keycloak shell-keycloak-db \
         keycloak-up keycloak-down keycloak-restart keycloak-logs keycloak-ps keycloak-reset keycloak-wait \
         keycloak-export keycloak-token keycloak-userinfo keycloak-url keycloak-disable-ssl \
         seed-data seed-reset \
@@ -64,7 +63,7 @@ PGADMIN_PORT       ?= 5050
         clean-dev clean-all prune \
         test-backend test-backend-cov lint-backend lint-backend-fix format-backend \
         prod-up prod-down prod-stop prod-restart prod-pull prod-logs prod-ps \
-        prod-migrate prod-seed prod-cert-self-signed prod-cert-acme prod-reset \
+        prod-migrate prod-import-tfstate prod-restore-tfstate prod-seed prod-cert-self-signed prod-cert-acme prod-reset \
         prod-set-keycloak-urls \
         up down logs build
 
@@ -77,8 +76,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Services (dev): frontend, backend, worker, keycloak, postgres,"
-	@echo "                postgres-test, postgres-tfstate, keycloak-postgres,"
-	@echo "                redis, rabbitmq, pgadmin"
+	@echo "                postgres-test, keycloak-postgres, pgadmin"
 	@echo ""
 	@echo "Bootstrap a fresh checkout:  make init"
 	@echo "Show URLs:                   make urls"
@@ -127,7 +125,6 @@ urls: ## Show all dev URLs in one place
 	@echo "  Backend API Docs:   http://localhost:$(BACKEND_PORT)/docs"
 	@echo "  Keycloak Admin:     http://localhost:$(KEYCLOAK_PORT)/admin   (admin / admin)"
 	@echo "  Keycloak Realm:     http://localhost:$(KEYCLOAK_PORT)/realms/dhbw"
-	@echo "  RabbitMQ UI:        http://localhost:$(RABBITMQ_UI_PORT)       (admin / admin)"
 	@echo "  pgAdmin:            http://localhost:$(PGADMIN_PORT)            (admin@admin.com / admin)"
 	@echo ""
 
@@ -149,7 +146,7 @@ dev-stop: ## Stop dev containers without removing them
 dev-restart: ## Restart dev environment
 	$(DC_DEV) restart
 
-dev-restart-backend: ## Restart backend only (e.g. after editing celery_app.py)
+dev-restart-backend: ## Restart backend only
 	$(DC_DEV) restart backend
 
 dev-restart-frontend: ## Restart frontend only
@@ -207,9 +204,6 @@ shell-frontend: ## Open sh in frontend container (dev)
 
 shell-db: ## Open psql in dev Postgres (backend_dev)
 	$(DC_DEV) exec postgres psql -U postgres -d backend_dev
-
-shell-redis: ## Open redis-cli (dev)
-	$(DC_DEV) exec redis redis-cli
 
 shell-keycloak: ## Open bash in Keycloak container (dev)
 	$(DC_DEV) exec keycloak bash
@@ -352,8 +346,11 @@ seed-reset: ## ⚠️  Reset DB + Keycloak realm, then seed
 # Migrations on the deployed stack run automatically as a step in
 # the Ansible CD pipeline (infrastructure/ansible/staging.yml)
 # — there is no local migrate-deploy target, on purpose.
-migrate-dev: ## Run database migrations (dev)
+migrate-dev: ## Run database migrations (dev) and let the worker role log in
 	$(DC_DEV) exec backend poetry run alembic upgrade head
+	@# The migration creates the worker's DB role (appstore_worker) with its
+	@# column grants; the password comes from WORKER_DB_PASSWORD.
+	$(DC_DEV) exec backend poetry run python scripts/worker_db_role.py
 
 migration-create: ## Autogenerate migration (usage: make migration-create MSG="message")
 	@if [ -z "$(MSG)" ]; then \
@@ -481,6 +478,21 @@ prod-ps: ## List prod containers + health
 
 prod-migrate: ## Apply Alembic migrations against the running backend-prod container
 	$(DOCKER) exec backend-prod python -m alembic upgrade head
+	$(DOCKER) exec backend-prod python scripts/worker_db_role.py
+
+prod-import-tfstate: ## One-off cut-over: copy OpenTofu states from the old postgres-tfstate DB (TFSTATE_DATABASE_URL=...)
+	@if [ -z "$(TFSTATE_DATABASE_URL)" ]; then \
+		echo "Usage: make prod-import-tfstate TFSTATE_DATABASE_URL=postgresql://USER:PW@postgres-tfstate-prod:5432/DB"; \
+		exit 1; \
+	fi
+	$(DOCKER) exec -e TFSTATE_DATABASE_URL="$(TFSTATE_DATABASE_URL)" backend-prod python scripts/import_tfstate.py
+
+prod-restore-tfstate: ## Put back a state the worker rescued (DEPLOYMENT=<uuid> FILE=<path from the task log>)
+	@if [ -z "$(DEPLOYMENT)" ] || [ -z "$(FILE)" ]; then \
+		echo "Usage: make prod-restore-tfstate DEPLOYMENT=<deployment-uuid> FILE=/var/lib/appstore-worker/rescued-state/<name>.tfstate.enc"; \
+		exit 1; \
+	fi
+	$(DOCKER) exec worker-prod cat "$(FILE)" | $(DOCKER) exec -i backend-prod python scripts/restore_tfstate.py "$(DEPLOYMENT)" - $(if $(FORCE),--force,)
 
 prod-seed: ## Seed Keycloak users + DB (kurse, apps, approvals) against the prod stack
 	@# Same shape as dev's seed-data: copy script + descriptions + realm
@@ -580,8 +592,8 @@ prod-cert-acme: ## Issue a real cert via DHBW's ACME server (DNS-01). Reads TLS_
 	@echo ""
 	@echo "✓ ACME-Cert für '$$TLS_DOMAIN' liegt unter $(PROD_CERT_DIR)/ (Renewal via acme.sh-Cronjob automatisch)"
 
-prod-reset: ## ⚠️  STOP prod + DELETE all volumes (DBs, Keycloak, RabbitMQ). Irreversible.
-	@echo "⚠️  This wipes ALL prod data: postgres, keycloak DB, rabbitmq, redis, tfstate."
+prod-reset: ## ⚠️  STOP prod + DELETE all volumes (DBs, Keycloak). Irreversible.
+	@echo "⚠️  This wipes ALL prod data: postgres (incl. job queue and OpenTofu state), keycloak DB."
 	@read -p "Type 'yes' to continue: " -r REPLY; \
 	if [ "$$REPLY" = "yes" ]; then \
 	  $(DC_PROD) down -v; \

@@ -404,6 +404,38 @@
         path: /root/.docker/config.json
         state: absent
 
+    # Restarting the backend in the middle of an apply leaves OpenTofu
+    # without its state API. The worker rides that out (retries, then it
+    # keeps pushing errored.tfstate, then it keeps an encrypted copy), but
+    # it is better not to provoke it: wait up to 10 minutes for running
+    # jobs, then deploy anyway and say so. (Waiting longer would block
+    # every deploy behind a Packer build of up to an hour.) Rationale:
+    # other/Entscheidungsprotokoll postgres-tfstate.md, risk 1.
+    - name: Laufende Deployment-Jobs abwarten (max. 10 Minuten)
+      ansible.builtin.shell:
+        cmd: |
+          set -uo pipefail
+          env_file="{{ project_root }}/.env"
+          db_user=$(grep -E '^DB_USER=' "$env_file" | head -n1 | cut -d= -f2- | tr -d '\042\047\r')
+          db_name=$(grep -E '^DB_NAME=' "$env_file" | head -n1 | cut -d= -f2- | tr -d '\042\047\r')
+          docker exec postgres-prod psql -U "$db_user" -d "$db_name" -tAc \
+            "SELECT count(*) FROM tasks WHERE status = 'RUNNING'" 2>/dev/null || echo 0
+        executable: /bin/bash
+      register: running_jobs
+      until: running_jobs.stdout | trim == "0"
+      retries: 20
+      delay: 30
+      failed_when: false
+      changed_when: false
+
+    - name: Warnen, wenn beim Neustart noch Jobs laufen
+      ansible.builtin.debug:
+        msg: >-
+          Achtung: {{ running_jobs.stdout | trim }} Deployment-Job(s) laufen noch. Der Neustart
+          wird trotzdem ausgeführt; der Worker wiederholt den State-Upload und sichert den State
+          notfalls verschlüsselt (siehe Task-Log, make prod-restore-tfstate).
+      when: running_jobs.stdout | trim != "0"
+
     - name: Start the application with Docker Compose
       community.docker.docker_compose_v2:
         project_src: "{{ project_root }}"
@@ -476,6 +508,14 @@
       ansible.builtin.command: docker exec backend-prod python -m alembic upgrade head
       register: migration_result
       changed_when: "'Running upgrade' in migration_result.stdout"
+
+    # The migrations create the worker's database role (appstore_worker)
+    # with its column grants but no password; this sets it from
+    # WORKER_DB_PASSWORD (in the backend's environment). Idempotent. The
+    # worker retries its connection until this has run.
+    - name: Let the worker role log in
+      ansible.builtin.command: docker exec backend-prod python scripts/worker_db_role.py
+      changed_when: false
 
     # Same shape as `make prod-seed` (Makefile): copies the seed script +
     # app descriptions + realm export into backend-prod and runs it there,
