@@ -2,8 +2,8 @@
 # Production stack — STANDALONE, registry-only, always-latest.
 #
 # This is the production-VM compose file. It runs the full stack:
-# postgres (app DB), postgres-tfstate (Terraform state), keycloak
-# (+ its postgres), rabbitmq, redis, backend, worker, frontend,
+# postgres (app DB — also the job queue and the OpenTofu state), keycloak
+# (+ its postgres), backend, worker, frontend,
 # nginx (TLS reverse proxy).
 #
 #   docker compose -f docker-compose.prod.yml up -d --pull always
@@ -67,40 +67,6 @@ services:
           memory: 512M
 
   # ----------------------------------------------------------------
-  # PostgreSQL Database (Terraform Remote State)
-  # ----------------------------------------------------------------
-  # Worker-only Postgres for Terraform's ``pg`` backend. Deliberately
-  # isolated from the application DB: the worker must never reach the
-  # backend's data, only its own state store. One schema per deployment
-  # (``deployment_<uuid>``) keeps the locking/state surface tight. Not
-  # exposed on the host — internal to worker-network.
-  postgres-tfstate:
-    image: postgres:16-alpine
-    container_name: postgres-tfstate-prod
-    environment:
-      POSTGRES_USER: ${TFSTATE_DB_USER:?TFSTATE_DB_USER is required}
-      POSTGRES_PASSWORD: ${TFSTATE_DB_PASSWORD:?TFSTATE_DB_PASSWORD is required}
-      POSTGRES_DB: ${TFSTATE_DB_NAME:?TFSTATE_DB_NAME is required}
-    volumes:
-      - postgres_tfstate_prod_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${TFSTATE_DB_USER}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - worker-network
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
-        reservations:
-          cpus: '0.25'
-          memory: 256M
-
-  # ----------------------------------------------------------------
   # Keycloak database
   # ----------------------------------------------------------------
   keycloak-postgres:
@@ -156,59 +122,6 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # RabbitMQ (Celery broker)
-  # ----------------------------------------------------------------
-  rabbitmq:
-    image: rabbitmq:3.13-management-alpine
-    container_name: rabbitmq-prod
-    hostname: rabbitmq-prod
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?RABBITMQ_USER is required}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
-    ports:
-      - "${RABBITMQ_PORT:-5672}:5672"
-      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
-    volumes:
-      - rabbitmq_prod_data:/var/lib/rabbitmq
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - backend-network
-      - worker-network
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
-        reservations:
-          cpus: '0.25'
-          memory: 512M
-
-  # ----------------------------------------------------------------
-  # Redis — Celery RESULT backend (broker is RabbitMQ above).
-  # ----------------------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: redis-prod
-    hostname: redis
-    volumes:
-      - redis_prod_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - backend-network
-      - worker-network
-    restart: unless-stopped
-
-  # ----------------------------------------------------------------
   # Backend API (FastAPI)
   # ----------------------------------------------------------------
   # Always-latest from GHCR. ``pull_policy: always`` ensures every
@@ -240,9 +153,9 @@ services:
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
 
-      # Celery (broker = RabbitMQ, result backend = Redis)
-      CELERY_BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/${RABBITMQ_VHOST:-/}
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      # Password of the worker's database role (appstore_worker); set by
+      # `python scripts/worker_db_role.py` right after the migrations.
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?WORKER_DB_PASSWORD is required}
 
       # Keycloak
       KEYCLOAK_SERVER_URL: ${KEYCLOAK_SERVER_URL:-http://keycloak:8080}
@@ -258,7 +171,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
 
       # Email (Gmail SMTP) — used by the post-deploy notify hook in
-      # celery_event_listener.py. SMTP_ENABLED is the explicit
+      # services/task_finalizer.py (sent once per deploy). SMTP_ENABLED is the explicit
       # kill-switch (default false): even with SMTP_USER/SMTP_PASSWORD
       # populated, mail delivery only happens when SMTP_ENABLED=true.
       SMTP_ENABLED: ${SMTP_ENABLED:-false}
@@ -285,10 +198,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       keycloak:
         condition: service_started
     volumes:
@@ -302,6 +211,9 @@ services:
     networks:
       - frontend-network
       - backend-network
+      # The worker reaches /internal/tfstate (OpenTofu's state backend)
+      # over this network; it never sees nginx, frontend or keycloak.
+      - worker-network
     restart: unless-stopped
     deploy:
       resources:
@@ -318,25 +230,28 @@ services:
         max-file: "3"
 
   # ----------------------------------------------------------------
-  # Worker Service (Celery)
+  # Worker Service (Postgres job queue)
   # ----------------------------------------------------------------
-  # Worker has NO access to the application DB — it only talks to
-  # RabbitMQ/Redis (Celery) and postgres-tfstate (Terraform state).
+  # Claims jobs from the `tasks` table (LISTEN task_queued + SKIP
+  # LOCKED) as the `appstore_worker` role, which the backend migration
+  # grants exactly the queue columns — no users, credentials or state.
+  # OpenTofu reaches the state through the backend's /internal/tfstate
+  # with a per-task token. The jobs' tools run as their own UID and see
+  # none of this environment (app/job_context.py).
   worker:
     image: ghcr.io/nextappstore/worker:latest
     pull_policy: always
     container_name: worker-prod
     environment:
-      # Celery (broker = RabbitMQ, result backend = Redis)
-      CELERY_BROKER_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/${RABBITMQ_VHOST:-/}
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      # Job queue: the application DB, as the restricted worker role.
+      DATABASE_URL: postgresql://appstore_worker:${WORKER_DB_PASSWORD:?WORKER_DB_PASSWORD is required}@postgres:5432/${DB_NAME}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
 
-      # OpenStack credential decryption (must match backend)
+      # OpenTofu state backend (/internal/tfstate) on the backend.
+      APPSTORE_API_URL: http://backend:8000
+
+      # Job payload / OpenStack credential decryption (must match backend)
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
-
-      # Terraform pg backend — isolated DB, NOT the application DB.
-      # Worker uses one schema per deployment (deployment_<uuid>).
-      TFSTATE_DATABASE_URL: postgresql://${TFSTATE_DB_USER}:${TFSTATE_DB_PASSWORD}@postgres-tfstate:5432/${TFSTATE_DB_NAME}?sslmode=disable
 
       # Git
       GIT_ACCESS_TOKEN: ${GIT_ACCESS_TOKEN:?GIT_ACCESS_TOKEN is required}
@@ -345,17 +260,23 @@ services:
       DEBUG: "False"
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
-      rabbitmq:
+      postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      postgres-tfstate:
-        condition: service_healthy
+      backend:
+        condition: service_started
     volumes:
       - worker_git_repos:/tmp/repos
+      # States OpenTofu could not save (API unreachable for minutes),
+      # kept encrypted until `make prod-restore-tfstate` puts them back.
+      - worker_rescued_state:/var/lib/appstore-worker/rescued-state
     networks:
       - worker-network
     restart: unless-stopped
+    # On SIGTERM the worker claims nothing new and lets running jobs
+    # finish (an apply or Packer build can take many minutes). A job
+    # killed anyway is failed by the backend once its lease runs out;
+    # nothing is retried automatically.
+    stop_grace_period: 30m
     deploy:
       resources:
         limits:
@@ -459,17 +380,13 @@ services:
 volumes:
   postgres_prod_data:
     driver: local
-  postgres_tfstate_prod_data:
-    driver: local
   keycloak_postgres_prod_data:
-    driver: local
-  rabbitmq_prod_data:
-    driver: local
-  redis_prod_data:
     driver: local
   backend_git_repos:
     driver: local
   worker_git_repos:
+    driver: local
+  worker_rescued_state:
     driver: local
 
 # ----------------------------------------------------------------
