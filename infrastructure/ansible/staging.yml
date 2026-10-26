@@ -22,6 +22,12 @@
       ip6tables: true
 
   pre_tasks:
+    - name: Unused Docker images aufräumen
+      community.docker.docker_prune:
+        images: yes
+        images_filters:
+          dangling: false
+
     - name: Verzeichnis für App erstellen
       ansible.builtin.file:
         path: "{{ project_root }}"
