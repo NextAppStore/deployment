@@ -33,6 +33,9 @@ spec:
               value: {{ .Values.frontend.env.appUrl | quote }}
             - name: VITE_API_URL
               value: {{ .Values.frontend.env.apiUrl | quote }}
+            # Optional accent colour (#RRGGBB). Empty = ScholarStack red.
+            - name: VITE_ACCENT_COLOR
+              value: {{ .Values.frontend.env.accentColor | quote }}
           ports:
             - containerPort: {{ .Values.frontend.port }}
           readinessProbe:

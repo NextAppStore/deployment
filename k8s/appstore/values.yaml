@@ -55,7 +55,6 @@ backend:
     ltiPlatformJwksUrl: ""
     ltiClientId: ""
     ltiDeploymentId: ""
-    ltiNonceRedisUrl: "redis://redis:6379/1"
     debug: false
     appName: "Backend API"
     logLevel: info
@@ -65,6 +64,12 @@ worker:
     repository: worker
     tag: latest
   replicas: 1
+  concurrency: 4
+  # On SIGTERM the worker claims nothing new and lets running jobs finish
+  # (an apply or Packer build can take many minutes) — mirrors compose's
+  # stop_grace_period: 30m. A job killed anyway is failed by the backend
+  # once its lease runs out; nothing is retried automatically.
+  terminationGracePeriodSeconds: 1800
   resources:
     requests:
       cpu: 500m
@@ -72,6 +77,8 @@ worker:
     limits:
       cpu: "2"
       memory: 2Gi
+  rescuedState:
+    storage: 5Gi
   env:
     debug: false
     logLevel: info
@@ -95,6 +102,8 @@ frontend:
     appUrl: ""
     apiUrl: ""
     keycloakUrl: ""
+    # Optional accent colour (#RRGGBB). Empty = ScholarStack red.
+    accentColor: ""
 
 postgres:
   image: postgres:16-alpine
@@ -106,17 +115,6 @@ postgres:
     limits:
       cpu: "2"
       memory: 2Gi
-
-postgresTfstate:
-  image: postgres:16-alpine
-  storage: 5Gi
-  resources:
-    requests:
-      cpu: 125m
-      memory: 256Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
 
 keycloak:
   image: quay.io/keycloak/keycloak:23.0
@@ -132,22 +130,6 @@ keycloak:
   postgres:
     image: postgres:16-alpine
     storage: 5Gi
-
-rabbitmq:
-  image: rabbitmq:3.13-management-alpine
-  vhost: "/"
-  storage: 5Gi
-  resources:
-    requests:
-      cpu: 125m
-      memory: 512Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
-
-redis:
-  image: redis:7-alpine
-  storage: 1Gi
 
 migration:
   # Runs `python -m alembic upgrade head` as an ArgoCD PostSync hook,

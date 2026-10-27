@@ -53,14 +53,12 @@ spec:
               value: {{ .Values.backend.env.accessTokenExpireMinutes | quote }}
             - name: CREDENTIAL_ENCRYPTION_KEY
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
-            - name: RABBITMQ_USER
-              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_USER } }
-            - name: RABBITMQ_PASSWORD
-              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_PASSWORD } }
-            - name: CELERY_BROKER_URL
-              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq:5672/{{ .Values.rabbitmq.vhost }}"
-            - name: CELERY_RESULT_BACKEND
-              value: "redis://redis:6379/0"
+            # Password of the worker's database role (appstore_worker); the
+            # migration Job creates the role, scripts/worker_db_role.py
+            # (run as its own PostSync step, see migration-job.yaml) sets
+            # its password from this same value.
+            - name: WORKER_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: WORKER_DB_PASSWORD } }
             - name: KEYCLOAK_SERVER_URL
               value: {{ .Values.backend.env.keycloakServerUrl | quote }}
             - name: KEYCLOAK_REALM
@@ -101,8 +99,6 @@ spec:
               value: {{ .Values.backend.env.ltiDeploymentId | quote }}
             - name: LTI_SESSION_SECRET
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: LTI_SESSION_SECRET } }
-            - name: LTI_NONCE_REDIS_URL
-              value: {{ .Values.backend.env.ltiNonceRedisUrl | quote }}
             - name: API_BASE_URL
               value: {{ .Values.backend.env.apiBaseUrl | quote }}
             - name: DEBUG

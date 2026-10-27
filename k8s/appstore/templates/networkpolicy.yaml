@@ -1,8 +1,10 @@
 # Replicates the bridge-network isolation boundaries from
-# docker-compose.staging.yml's `networks:` section:
+# docker-compose.staging.yml's `networks:` section (post techstack-
+# simplification: RabbitMQ/Redis/postgres-tfstate are gone):
 #   - frontend-network: ingress, frontend, backend
-#   - backend-network:  backend, postgres, rabbitmq, redis, keycloak, ingress
-#   - worker-network:   worker, rabbitmq, redis, postgres-tfstate (NOT the app DB)
+#   - backend-network:  backend, postgres, keycloak, ingress
+#   - worker-network:   worker, backend (for /internal/tfstate), postgres
+#     (as the restricted appstore_worker role — see worker.yaml)
 #   - keycloak-network: keycloak, keycloak-postgres, ingress
 #
 # Default-deny ingress within the namespace, then explicit allows per
@@ -64,9 +66,15 @@ spec:
     matchLabels: {{ include "appstore.selectorLabels" "postgres" | fromYaml | toJson }}
   policyTypes: ["Ingress"]
   ingress:
+    # backend (application DB role) and worker (appstore_worker role,
+    # restricted by DB grants to the job queue columns — see
+    # worker_db_role.py / the migration that creates the role) both
+    # connect directly now that there is no separate postgres-tfstate.
     - from:
         - podSelector:
             matchLabels: {{ include "appstore.selectorLabels" "backend" | fromYaml | toJson }}
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "worker" | fromYaml | toJson }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -81,49 +89,3 @@ spec:
     - from:
         - podSelector:
             matchLabels: {{ include "appstore.selectorLabels" "keycloak" | fromYaml | toJson }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-to-postgres-tfstate
-  namespace: {{ .Values.global.namespace }}
-spec:
-  podSelector:
-    matchLabels: {{ include "appstore.selectorLabels" "postgres-tfstate" | fromYaml | toJson }}
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels: {{ include "appstore.selectorLabels" "worker" | fromYaml | toJson }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-to-rabbitmq
-  namespace: {{ .Values.global.namespace }}
-spec:
-  podSelector:
-    matchLabels: {{ include "appstore.selectorLabels" "rabbitmq" | fromYaml | toJson }}
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels: {{ include "appstore.selectorLabels" "backend" | fromYaml | toJson }}
-        - podSelector:
-            matchLabels: {{ include "appstore.selectorLabels" "worker" | fromYaml | toJson }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-to-redis
-  namespace: {{ .Values.global.namespace }}
-spec:
-  podSelector:
-    matchLabels: {{ include "appstore.selectorLabels" "redis" | fromYaml | toJson }}
-  policyTypes: ["Ingress"]
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels: {{ include "appstore.selectorLabels" "backend" | fromYaml | toJson }}
-        - podSelector:
-            matchLabels: {{ include "appstore.selectorLabels" "worker" | fromYaml | toJson }}

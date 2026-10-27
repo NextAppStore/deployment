@@ -1,6 +1,14 @@
-# Celery worker. Mirrors the `worker` service in docker-compose.staging.yml.
-# Has NO access to the application database — only RabbitMQ/Redis (Celery)
-# and postgres-tfstate (Terraform state). Enforced by networkpolicy.yaml.
+# Worker (Postgres-native job queue — Celery/RabbitMQ/Redis removed by
+# the techstack-simplification). Mirrors the `worker` service in
+# docker-compose.staging.yml.
+#
+# Claims jobs from the `tasks` table (LISTEN task_queued + SKIP LOCKED)
+# as the restricted `appstore_worker` role, which the migration grants
+# exactly the queue columns — no app data, no credentials. OpenTofu
+# reaches its state through the backend's /internal/tfstate endpoint
+# with a per-task token (blocked from public ingress — see ingress.yaml),
+# not a direct DB connection, so the worker no longer needs its own
+# postgres-tfstate service or isolated network segment for that purpose.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,28 +26,28 @@ spec:
       labels:
         {{- include "appstore.selectorLabels" "worker" | nindent 8 }}
     spec:
+      # On SIGTERM the worker claims nothing new and lets running jobs
+      # finish (an apply or Packer build can take many minutes) — mirrors
+      # compose's `stop_grace_period: 30m`. A job killed anyway is failed
+      # by the backend once its lease runs out; nothing is retried
+      # automatically.
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
       containers:
         - name: worker
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.worker.image.repository "tag" .Values.worker.image.tag) }}
           env:
-            - name: RABBITMQ_USER
-              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_USER } }
-            - name: RABBITMQ_PASSWORD
-              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_PASSWORD } }
-            - name: CELERY_BROKER_URL
-              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq:5672/{{ .Values.rabbitmq.vhost }}"
-            - name: CELERY_RESULT_BACKEND
-              value: "redis://redis:6379/0"
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+            - name: WORKER_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: WORKER_DB_PASSWORD } }
+            - name: DATABASE_URL
+              value: "postgresql://appstore_worker:$(WORKER_DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: WORKER_CONCURRENCY
+              value: {{ .Values.worker.concurrency | quote }}
+            - name: APPSTORE_API_URL
+              value: "http://backend:{{ .Values.backend.port }}"
             - name: CREDENTIAL_ENCRYPTION_KEY
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
-            - name: TFSTATE_DB_USER
-              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: TFSTATE_DB_USER } }
-            - name: TFSTATE_DB_PASSWORD
-              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: TFSTATE_DB_PASSWORD } }
-            - name: TFSTATE_DB_NAME
-              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: TFSTATE_DB_NAME } }
-            - name: TFSTATE_DATABASE_URL
-              value: "postgresql://$(TFSTATE_DB_USER):$(TFSTATE_DB_PASSWORD)@postgres-tfstate:5432/$(TFSTATE_DB_NAME)?sslmode=disable"
             - name: GIT_ACCESS_TOKEN
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: GIT_ACCESS_TOKEN } }
             - name: DEBUG
@@ -51,6 +59,30 @@ spec:
           volumeMounts:
             - name: git-repos
               mountPath: /tmp/repos
+            - name: rescued-state
+              mountPath: /var/lib/appstore-worker/rescued-state
       volumes:
         - name: git-repos
           emptyDir: {}
+        # worker_rescued_state in compose is a named (persistent-across-
+        # restart) volume — states OpenTofu couldn't save (API
+        # unreachable for minutes) are kept here encrypted until
+        # `make prod-restore-tfstate` puts them back. A Deployment can't
+        # declare a volumeClaimTemplate the way a StatefulSet can, so
+        # this references a standalone PVC (below) instead. Only safe
+        # with worker.replicas: 1 — a ReadWriteOnce PVC shared by more
+        # than one pod would not give each worker its own rescue area.
+        - name: rescued-state
+          persistentVolumeClaim:
+            claimName: worker-rescued-state
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: worker-rescued-state
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.worker.rescuedState.storage }}

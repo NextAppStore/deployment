@@ -5,6 +5,12 @@
 # only declares intent via the secretName / cert-manager annotation.
 #
 # Path routing mirrors nginx/nginx.conf:
+#   /api/internal/                         -> 404 (worker-only, reached
+#                                              directly over the cluster
+#                                              network — see networkpolicy.yaml
+#                                              allow-to-backend — never via
+#                                              this public Ingress; must
+#                                              precede /api/ below)
 #   /realms/, /resources/, /admin/, /js/  -> keycloak:8080  (must precede /)
 #   /api/                                  -> backend:8000   (prefix stripped)
 #   /                                       -> frontend:8080  (SPA catch-all)
@@ -21,6 +27,17 @@ metadata:
     # Backend's /api prefix-strip, equivalent to nginx's `rewrite ^/api/(.*) /$1 break`.
     nginx.ingress.kubernetes.io/rewrite-target: /$2
     nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    # Ingress has no "null backend" primitive for the /api/internal/ block
+    # rule nginx.conf uses (`return 404;`) — a configuration-snippet is the
+    # direct equivalent on an nginx-ingress controller. Requires
+    # `allow-snippet-annotations: "true"` in the controller's ConfigMap
+    # (default-disabled on recent ingress-nginx for CVE-2021-25742 —
+    # confirm it's enabled, or this annotation is silently dropped and
+    # /api/internal/ falls through to the backend rule below).
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      location ~ ^/api/internal/ {
+        return 404;
+      }
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}
