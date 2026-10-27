@@ -138,13 +138,6 @@ migration:
   # container-start logs.
   enabled: true
 
-# Secret keys this chart expects to exist in the external secret store,
-# grouped by which ExternalSecret resource requests them. See
-# templates/secrets.yaml for the full mapping and infrastructure/README.md
-# (to be updated) for how to provision them in the store.
-externalSecrets:
-  enabled: true
-  # Name of the ClusterSecretStore / SecretStore the ExternalSecret
-  # resources reference. Must already exist in the cluster.
-  secretStoreRef: appstore-secret-store
-  refreshInterval: 1h
+# appstore-core-secrets / appstore-frontend-secrets are created by hand
+# via kubectl, not by this chart — see templates/secrets.yaml for the
+# exact commands and why.
