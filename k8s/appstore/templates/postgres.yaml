@@ -1,0 +1,70 @@
+# Application database. Mirrors the `postgres` service in
+# docker-compose.staging.yml (postgres:16-alpine, DB_USER/DB_PASSWORD/DB_NAME).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "postgres" | nindent 4 }}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "postgres" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "postgres" | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: DB_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: DB_NAME }
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "postgres" | nindent 4 }}
+  ports:
+    - port: 5432
+      targetPort: 5432

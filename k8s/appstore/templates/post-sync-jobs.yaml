@@ -1,0 +1,98 @@
+# Two ArgoCD PostSync hooks, replacing the equivalent Ansible tasks in
+# infrastructure/ansible/staging.yml:
+#
+#   1. appstore-sync-keycloak-urls — runs seed/set_keycloak_urls.py.
+#      Patches appstore-frontend/appstore-backend client redirect/webOrigin
+#      URLs to the live Ingress host, since the realm import only happens
+#      once against an empty DB.
+#
+#   2. appstore-seed-data — runs seed/seed_data.py, which needs the
+#      rendered realm-export.json (ConfigMap rendered in keycloak.yaml)
+#      to resolve role/client IDs when creating demo users.
+#
+# Both scripts run straight from /app/seed inside the backend image — the
+# k8s-deploy.yml CI workflow copies deployment/seed/ into the backend
+# build context before `docker build`, so these files ship as part of the
+# already-versioned backend image (ghcr.io/nextappstore/backend:<tag>)
+# instead of being injected via ConfigMap. One seed/ folder, no sync step,
+# no drift risk — see k8s-deploy.yml for the copy step.
+#
+# Both run after appstore-migrate (same sync-wave) since they depend on
+# the schema existing; relative ordering between the two of them doesn't
+# matter (seed_data.py only reads Keycloak, doesn't touch client URLs).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: appstore-sync-keycloak-urls
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sync-keycloak-urls
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
+          command: ["python", "/app/seed/set_keycloak_urls.py"]
+          env:
+            - name: KEYCLOAK_SERVER_URL
+              value: {{ .Values.backend.env.keycloakServerUrl | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ .Values.backend.env.keycloakRealm | quote }}
+            - name: KEYCLOAK_ADMIN_USER
+              value: {{ .Values.keycloak.adminUser | quote }}
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_ADMIN_PASSWORD } }
+            - name: APP_BASE_URL
+              value: {{ .Values.backend.env.appBaseUrl | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: appstore-seed-data
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed-data
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
+          command: ["python", "/app/seed/seed_data.py"]
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+            - name: KEYCLOAK_SERVER_URL
+              value: {{ .Values.backend.env.keycloakServerUrl | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ .Values.backend.env.keycloakRealm | quote }}
+            - name: KEYCLOAK_ADMIN_USER
+              value: {{ .Values.keycloak.adminUser | quote }}
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_ADMIN_PASSWORD } }
+            - name: REALM_EXPORT_PATH
+              value: /tmp/realm-export.json
+          volumeMounts:
+            - name: realm-export
+              mountPath: /tmp/realm-export.json
+              subPath: realm-export.json
+              readOnly: true
+      volumes:
+        - name: realm-export
+          configMap:
+            name: keycloak-realm-export

@@ -1,0 +1,78 @@
+# Replaces the nginx reverse-proxy container + its hand-maintained TLS
+# cert provisioning (nginx/nginx.conf + the Ansible self-signed/ACME logic).
+# TLS termination and cert issuance are delegated to the Ingress
+# controller + cert-manager already running on the cluster; this chart
+# only declares intent via the secretName / cert-manager annotation.
+#
+# Path routing mirrors nginx/nginx.conf:
+#   /realms/, /resources/, /admin/, /js/  -> keycloak:8080  (must precede /)
+#   /api/                                  -> backend:8000   (prefix stripped)
+#   /                                       -> frontend:8080  (SPA catch-all)
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: appstore
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    {{- if .Values.ingress.tls.enabled }}
+    cert-manager.io/cluster-issuer: letsencrypt-dns
+    {{- end }}
+    # Backend's /api prefix-strip, equivalent to nginx's `rewrite ^/api/(.*) /$1 break`.
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: backend
+                port:
+                  number: {{ .Values.backend.port }}
+          - path: /realms(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /resources(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /admin(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /js(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /()(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: {{ .Values.frontend.port }}
+{{- end }}

@@ -1,0 +1,56 @@
+# Celery worker. Mirrors the `worker` service in docker-compose.staging.yml.
+# Has NO access to the application database — only RabbitMQ/Redis (Celery)
+# and postgres-tfstate (Terraform state). Enforced by networkpolicy.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "worker" | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "worker" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "worker" | nindent 8 }}
+    spec:
+      containers:
+        - name: worker
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.worker.image.repository "tag" .Values.worker.image.tag) }}
+          env:
+            - name: RABBITMQ_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_USER } }
+            - name: RABBITMQ_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_PASSWORD } }
+            - name: CELERY_BROKER_URL
+              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq:5672/{{ .Values.rabbitmq.vhost }}"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://redis:6379/0"
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
+            - name: TFSTATE_DB_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: TFSTATE_DB_USER } }
+            - name: TFSTATE_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: TFSTATE_DB_PASSWORD } }
+            - name: TFSTATE_DB_NAME
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: TFSTATE_DB_NAME } }
+            - name: TFSTATE_DATABASE_URL
+              value: "postgresql://$(TFSTATE_DB_USER):$(TFSTATE_DB_PASSWORD)@postgres-tfstate:5432/$(TFSTATE_DB_NAME)?sslmode=disable"
+            - name: GIT_ACCESS_TOKEN
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: GIT_ACCESS_TOKEN } }
+            - name: DEBUG
+              value: {{ .Values.worker.env.debug | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.worker.env.logLevel | quote }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: git-repos
+              mountPath: /tmp/repos
+      volumes:
+        - name: git-repos
+          emptyDir: {}

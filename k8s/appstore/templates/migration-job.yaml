@@ -1,0 +1,34 @@
+# Runs `python -m alembic upgrade head` as an ArgoCD PostSync hook — kept
+# as its own Job (not a backend initContainer) for the same reason the
+# Ansible playbook runs it as a dedicated step rather than inside compose:
+# migration failures must surface directly in the hook's own log/status,
+# not be buried inside a container-start retry loop. hook-delete-policy
+# removes the completed Job so re-syncs don't collide with a stale name.
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: appstore-migrate
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
+          command: ["python", "-m", "alembic", "upgrade", "head"]
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+{{- end }}

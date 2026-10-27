@@ -1,0 +1,63 @@
+# Frontend (Vue 3 SPA, served by nginx inside the image). Mirrors the
+# `frontend` service in docker-compose.staging.yml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "frontend" | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "frontend" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "frontend" | nindent 8 }}
+    spec:
+      containers:
+        - name: frontend
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.frontend.image.repository "tag" .Values.frontend.image.tag) }}
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: VITE_KEYCLOAK_URL
+              value: {{ .Values.frontend.env.keycloakUrl | quote }}
+            - name: VITE_KEYCLOAK_REALM
+              value: {{ .Values.frontend.env.keycloakRealm | quote }}
+            - name: VITE_KEYCLOAK_CLIENT_ID
+              value: {{ .Values.frontend.env.keycloakClientId | quote }}
+            - name: VITE_APP_URL
+              value: {{ .Values.frontend.env.appUrl | quote }}
+            - name: VITE_API_URL
+              value: {{ .Values.frontend.env.apiUrl | quote }}
+          ports:
+            - containerPort: {{ .Values.frontend.port }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.frontend.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.frontend.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "frontend" | nindent 4 }}
+  ports:
+    - port: {{ .Values.frontend.port }}
+      targetPort: {{ .Values.frontend.port }}

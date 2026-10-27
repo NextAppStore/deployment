@@ -1,0 +1,129 @@
+# Replicates the bridge-network isolation boundaries from
+# docker-compose.staging.yml's `networks:` section:
+#   - frontend-network: ingress, frontend, backend
+#   - backend-network:  backend, postgres, rabbitmq, redis, keycloak, ingress
+#   - worker-network:   worker, rabbitmq, redis, postgres-tfstate (NOT the app DB)
+#   - keycloak-network: keycloak, keycloak-postgres, ingress
+#
+# Default-deny ingress within the namespace, then explicit allows per
+# component. (lti-egress-network's IPv6/NAT66 split has no Kubernetes
+# equivalent here — egress to Moodle is unrestricted; add an egress
+# NetworkPolicy + CNI-specific IPv6 support if that isolation is required.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "frontend" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-backend
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "backend" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-keycloak
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "keycloak" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-postgres
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "postgres" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "backend" | fromYaml | toJson }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-keycloak-postgres
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "keycloak-postgres" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "keycloak" | fromYaml | toJson }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-postgres-tfstate
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "postgres-tfstate" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "worker" | fromYaml | toJson }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-rabbitmq
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "rabbitmq" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "backend" | fromYaml | toJson }}
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "worker" | fromYaml | toJson }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-to-redis
+  namespace: {{ .Values.global.namespace }}
+spec:
+  podSelector:
+    matchLabels: {{ include "appstore.selectorLabels" "redis" | fromYaml | toJson }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "backend" | fromYaml | toJson }}
+        - podSelector:
+            matchLabels: {{ include "appstore.selectorLabels" "worker" | fromYaml | toJson }}

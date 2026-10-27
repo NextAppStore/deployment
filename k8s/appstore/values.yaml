@@ -1,0 +1,168 @@
+# Defaults shared by every environment. Environment-specific overrides
+# (image tags, hostnames, replica counts) live in values-<env>.yaml and are
+# passed to `helm template`/`helm upgrade` as a second -f file, or referenced
+# from the ArgoCD Application's `helm.valueFiles`.
+#
+# Mirrors deployment/docker-compose.staging.yml service-for-service. Secret
+# values (passwords, keys, tokens) never live here — see templates/secrets.yaml,
+# which declares ExternalSecret resources that pull real values from an
+# external store at sync time.
+
+global:
+  imageRegistry: ghcr.io/nextappstore
+  # Namespace all resources are deployed into. ArgoCD Applications normally
+  # set destination.namespace instead, but resources reference this value
+  # directly for cross-resource DNS (e.g. DATABASE_URL host).
+  namespace: appstore
+
+ingress:
+  enabled: true
+  className: nginx
+  host: ""
+  tls:
+    enabled: true
+    secretName: appstore-tls
+
+backend:
+  image:
+    repository: backend
+    tag: latest
+  replicas: 1
+  port: 8000
+  workers: 4
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  env:
+    algorithm: HS256
+    accessTokenExpireMinutes: 30
+    keycloakServerUrl: http://keycloak:8080
+    keycloakRealm: dhbw
+    keycloakClientId: appstore-backend
+    keycloakEnabled: true
+    corsOrigins: ""
+    smtpEnabled: false
+    smtpHost: smtp.gmail.com
+    smtpPort: 465
+    smtpFromName: "Click-n-Deploy"
+    appBaseUrl: ""
+    apiBaseUrl: ""
+    ltiPlatformIssuer: ""
+    ltiPlatformJwksUrl: ""
+    ltiClientId: ""
+    ltiDeploymentId: ""
+    ltiNonceRedisUrl: "redis://redis:6379/1"
+    debug: false
+    appName: "Backend API"
+    logLevel: info
+
+worker:
+  image:
+    repository: worker
+    tag: latest
+  replicas: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  env:
+    debug: false
+    logLevel: info
+
+frontend:
+  image:
+    repository: frontend
+    tag: latest
+  replicas: 1
+  port: 8080
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  env:
+    keycloakRealm: dhbw
+    keycloakClientId: appstore-frontend
+    appUrl: ""
+    apiUrl: ""
+    keycloakUrl: ""
+
+postgres:
+  image: postgres:16-alpine
+  storage: 10Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+postgresTfstate:
+  image: postgres:16-alpine
+  storage: 5Gi
+  resources:
+    requests:
+      cpu: 125m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+keycloak:
+  image: quay.io/keycloak/keycloak:23.0
+  adminUser: admin
+  realm: dhbw
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  postgres:
+    image: postgres:16-alpine
+    storage: 5Gi
+
+rabbitmq:
+  image: rabbitmq:3.13-management-alpine
+  vhost: "/"
+  storage: 5Gi
+  resources:
+    requests:
+      cpu: 125m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+redis:
+  image: redis:7-alpine
+  storage: 1Gi
+
+migration:
+  # Runs `python -m alembic upgrade head` as an ArgoCD PostSync hook,
+  # mirroring the dedicated Ansible task kept outside docker-compose so
+  # migration failures surface directly instead of being buried in
+  # container-start logs.
+  enabled: true
+
+# Secret keys this chart expects to exist in the external secret store,
+# grouped by which ExternalSecret resource requests them. See
+# templates/secrets.yaml for the full mapping and infrastructure/README.md
+# (to be updated) for how to provision them in the store.
+externalSecrets:
+  enabled: true
+  # Name of the ClusterSecretStore / SecretStore the ExternalSecret
+  # resources reference. Must already exist in the cluster.
+  secretStoreRef: appstore-secret-store
+  refreshInterval: 1h

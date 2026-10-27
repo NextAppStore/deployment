@@ -1,0 +1,159 @@
+name: CD - Kubernetes (ArgoCD) Staging Deployment
+#
+# Parallel path to staging.yml (the existing Ansible/VM deploy) — this
+# workflow never touches that one. It builds the three application
+# images and pushes the chart's image tags + rendered Keycloak realm
+# export to Git; ArgoCD (already running on the target cluster) picks up
+# that commit and reconciles it. No OpenTofu here: the cluster and
+# ArgoCD itself are provisioned and managed outside this repo.
+#
+# Two things get baked in at build/render time rather than living as
+# permanent duplicates in Git — see k8s/appstore/.gitignore and the
+# comments in k8s/appstore/templates/keycloak.yaml and post-sync-jobs.yaml:
+#   - deployment/seed/ is copied into the backend image's build context
+#     (backend/Dockerfile itself is untouched — COPY . . just picks up
+#     whatever's in the context) so seed_data.py/set_keycloak_urls.py run
+#     straight from inside the already-versioned backend image instead of
+#     via a ConfigMap copy.
+#   - keycloak/realm-export.json.j2 is copied into the chart's files/ dir
+#     (with its Jinja placeholders swapped for Helm-safe sentinels) right
+#     before `helm template`/packaging, since Helm's .Files.Get cannot
+#     read paths outside its own chart directory.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'backend/**'
+      - 'worker/**'
+      - 'frontend/**'
+      - 'seed/**'
+      - 'keycloak/realm-export.json.j2'
+      - 'k8s/**'
+      - '.github/workflows/k8s-deploy.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: nextappstore
+
+jobs:
+  build-and-push:
+    name: Build & Push Images
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: tag
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # backend/Dockerfile and the backend repo are NOT modified — this
+      # only stages seed/ inside the build context dir for the duration
+      # of this CI run so the existing `COPY . .` in backend/Dockerfile
+      # picks it up. Removed again after the build so nothing lingers in
+      # the checkout (irrelevant on a fresh runner, but keeps a reused
+      # self-hosted workspace clean between runs).
+      - name: Stage seed/ into backend build context
+        run: cp -r seed backend/seed
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/backend:${{ steps.tag.outputs.image_tag }}
+
+      - name: Remove staged seed/ from backend build context
+        if: always()
+        run: rm -rf backend/seed
+
+      - name: Build & push worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: worker
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/worker:${{ steps.tag.outputs.image_tag }}
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/frontend:${{ steps.tag.outputs.image_tag }}
+
+  render-and-sync:
+    name: Render Chart & Push Manifest Update
+    needs: build-and-push
+    runs-on: self-hosted
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      # Not committed — see k8s/appstore/.gitignore. Populated fresh every
+      # run from the single source of truth in keycloak/, then consumed by
+      # `helm template`/lint/package below in this same job.
+      - name: Render Keycloak realm-export template into the chart
+        run: |
+          set -euo pipefail
+          mkdir -p k8s/appstore/files
+          sed \
+            -e 's/{{ app_api_url }}/__APP_API_URL__/g' \
+            -e 's/{{ app_base_url }}/__APP_BASE_URL__/g' \
+            keycloak/realm-export.json.j2 > k8s/appstore/files/realm-export.json.tpl
+
+      - name: Bump image tags in values-staging.yaml
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          cd k8s/appstore
+          for svc in backend worker frontend; do
+            yq -i ".${svc}.image.tag = strenv(IMAGE_TAG)" values-staging.yaml
+          done
+
+      - name: Lint & template chart (sanity check before pushing)
+        run: |
+          cd k8s/appstore
+          helm lint . -f values-staging.yaml
+          helm template appstore . -f values-staging.yaml > /dev/null
+
+      - name: Commit & push updated values + rendered realm export
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/appstore/values-staging.yaml
+          if git diff --cached --quiet; then
+            echo "No image tag changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(k8s): bump staging image tags to ${IMAGE_TAG}"
+          git push origin HEAD:main
+
+      # ArgoCD (already registered against this repo + k8s/appstore path,
+      # see k8s/argocd/appstore-staging.yaml) picks up the commit above via
+      # its GitHub webhook or its regular poll — no further action here.

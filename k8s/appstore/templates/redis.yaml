@@ -1,0 +1,59 @@
+# Celery result backend (broker is RabbitMQ). Mirrors the `redis` service
+# in docker-compose.staging.yml. DB index 0 = Celery results, DB index 1 =
+# LTI OIDC nonce/state store (see backend.yaml LTI_NONCE_REDIS_URL).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "redis" | nindent 4 }}
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "redis" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "redis" | nindent 8 }}
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.redis.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "redis" | nindent 4 }}
+  ports:
+    - port: 6379
+      targetPort: 6379

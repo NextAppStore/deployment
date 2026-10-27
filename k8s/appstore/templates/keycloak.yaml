@@ -1,0 +1,163 @@
+# Keycloak + its dedicated Postgres. Mirrors the `keycloak-postgres` and
+# `keycloak` services in docker-compose.staging.yml.
+#
+# realm-export.json is rendered from files/realm-export.json.tpl, which the
+# k8s-deploy.yml CI workflow copies in from ../../keycloak/realm-export.json.j2
+# right before `helm template`/packaging (see k8s/appstore/.gitignore — this
+# directory is NOT committed, so a plain checkout won't have it; that copy
+# step also runs `sed` to swap the two Ansible/Jinja placeholders for
+# __APP_BASE_URL__/__APP_API_URL__ sentinels, since Jinja's templating
+# delimiters collide with Helm's). Only imported on first boot into an
+# empty DB — on redeploy the realm already exists, so client URL drift is
+# instead corrected by the post-sync Jobs in post-sync-jobs.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm-export
+  namespace: {{ .Values.global.namespace }}
+data:
+  realm-export.json: |-
+    {{- $appBaseUrl := printf "https://%s" .Values.ingress.host }}
+    {{- $appApiUrl := printf "https://%s/api" .Values.ingress.host }}
+    {{- $content := .Files.Get "files/realm-export.json.tpl" }}
+    {{- $content = $content | replace "__APP_BASE_URL__" $appBaseUrl }}
+    {{- $content = $content | replace "__APP_API_URL__" $appApiUrl }}
+    {{- $content | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak-postgres
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "keycloak-postgres" | nindent 4 }}
+spec:
+  serviceName: keycloak-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "keycloak-postgres" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "keycloak-postgres" | nindent 8 }}
+    spec:
+      containers:
+        - name: keycloak-postgres
+          image: {{ .Values.keycloak.postgres.image }}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_USER }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_PASSWORD }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_NAME }
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.keycloak.postgres.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-postgres
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "keycloak-postgres" | nindent 4 }}
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "keycloak" | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "keycloak" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "keycloak" | nindent 8 }}
+    spec:
+      containers:
+        - name: keycloak
+          image: {{ .Values.keycloak.image }}
+          # NOTE (same caveat as the compose comment this replaces): start-dev
+          # is HTTP/no-hostname-enforcement, fine behind the Ingress's TLS
+          # termination for staging. For a hardened prod realm, switch to
+          # `start` and set KC_HOSTNAME explicitly.
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://keycloak-postgres:5432/$(KEYCLOAK_DB_NAME)"
+            - name: KEYCLOAK_DB_NAME
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_NAME }
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_USER }
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_PASSWORD }
+            - name: KEYCLOAK_ADMIN
+              value: {{ .Values.keycloak.adminUser | quote }}
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_ADMIN_PASSWORD }
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY
+              value: edge
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: realm-export
+              mountPath: /opt/keycloak/data/import/realm-export.json
+              subPath: realm-export.json
+              readOnly: true
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}
+      volumes:
+        - name: realm-export
+          configMap:
+            name: keycloak-realm-export
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "keycloak" | nindent 4 }}
+  ports:
+    - port: 8080
+      targetPort: 8080

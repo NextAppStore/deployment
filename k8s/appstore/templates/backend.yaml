@@ -1,0 +1,153 @@
+# Backend API (FastAPI). Mirrors the `backend` service in
+# docker-compose.staging.yml. DB migrations are NOT run here — see
+# migration-job.yaml (ArgoCD PostSync hook), same separation-of-concerns
+# reasoning as the dedicated Ansible task it replaces.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "backend" | nindent 4 }}
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "backend" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "backend" | nindent 8 }}
+    spec:
+      containers:
+        - name: backend
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
+          command:
+            - python
+            - -m
+            - uvicorn
+            - app.main:app
+            - --host
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.backend.port | quote }}
+            - --workers
+            - {{ .Values.backend.env.workers | default .Values.backend.workers | quote }}
+            - --proxy-headers
+            - --forwarded-allow-ips
+            - "*"
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+            - name: SECRET_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SECRET_KEY } }
+            - name: ALGORITHM
+              value: {{ .Values.backend.env.algorithm | quote }}
+            - name: ACCESS_TOKEN_EXPIRE_MINUTES
+              value: {{ .Values.backend.env.accessTokenExpireMinutes | quote }}
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
+            - name: RABBITMQ_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_USER } }
+            - name: RABBITMQ_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: RABBITMQ_PASSWORD } }
+            - name: CELERY_BROKER_URL
+              value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@rabbitmq:5672/{{ .Values.rabbitmq.vhost }}"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://redis:6379/0"
+            - name: KEYCLOAK_SERVER_URL
+              value: {{ .Values.backend.env.keycloakServerUrl | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ .Values.backend.env.keycloakRealm | quote }}
+            - name: KEYCLOAK_CLIENT_ID
+              value: {{ .Values.backend.env.keycloakClientId | quote }}
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_CLIENT_SECRET } }
+            - name: KEYCLOAK_ENABLED
+              value: {{ .Values.backend.env.keycloakEnabled | quote }}
+            - name: GIT_ACCESS_TOKEN
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: GIT_ACCESS_TOKEN } }
+            - name: CORS_ORIGINS
+              value: {{ .Values.backend.env.corsOrigins | quote }}
+            - name: SMTP_ENABLED
+              value: {{ .Values.backend.env.smtpEnabled | quote }}
+            - name: SMTP_HOST
+              value: {{ .Values.backend.env.smtpHost | quote }}
+            - name: SMTP_PORT
+              value: {{ .Values.backend.env.smtpPort | quote }}
+            - name: SMTP_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SMTP_USER } }
+            - name: SMTP_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SMTP_PASSWORD } }
+            - name: SMTP_FROM_EMAIL
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SMTP_FROM_EMAIL } }
+            - name: SMTP_FROM_NAME
+              value: {{ .Values.backend.env.smtpFromName | quote }}
+            - name: APP_BASE_URL
+              value: {{ .Values.backend.env.appBaseUrl | quote }}
+            - name: LTI_PLATFORM_ISSUER
+              value: {{ .Values.backend.env.ltiPlatformIssuer | quote }}
+            - name: LTI_PLATFORM_JWKS_URL
+              value: {{ .Values.backend.env.ltiPlatformJwksUrl | quote }}
+            - name: LTI_CLIENT_ID
+              value: {{ .Values.backend.env.ltiClientId | quote }}
+            - name: LTI_DEPLOYMENT_ID
+              value: {{ .Values.backend.env.ltiDeploymentId | quote }}
+            - name: LTI_SESSION_SECRET
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: LTI_SESSION_SECRET } }
+            - name: LTI_NONCE_REDIS_URL
+              value: {{ .Values.backend.env.ltiNonceRedisUrl | quote }}
+            - name: API_BASE_URL
+              value: {{ .Values.backend.env.apiBaseUrl | quote }}
+            - name: DEBUG
+              value: {{ .Values.backend.env.debug | quote }}
+            - name: APP_NAME
+              value: {{ .Values.backend.env.appName | quote }}
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: {{ .Values.backend.port | quote }}
+            - name: WORKERS
+              value: {{ .Values.backend.workers | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.backend.env.logLevel | quote }}
+          ports:
+            - containerPort: {{ .Values.backend.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            - name: git-repos
+              mountPath: /tmp/repos
+      volumes:
+        - name: git-repos
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "backend" | nindent 4 }}
+  ports:
+    - port: {{ .Values.backend.port }}
+      targetPort: {{ .Values.backend.port }}

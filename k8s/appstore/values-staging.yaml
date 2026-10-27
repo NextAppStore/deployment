@@ -1,0 +1,33 @@
+# Staging overrides. Applied on top of values.yaml.
+#
+# Image tags are bumped by the CI workflow (deployment/.github/workflows/
+# k8s-deploy.yml, added separately) after each build — it edits the
+# `tag:` fields below via `yq` and commits, which is what triggers ArgoCD's
+# sync. Do not hand-edit tags on the staging branch outside that workflow
+# unless deliberately pinning a rollback.
+
+global:
+  namespace: appstore
+
+ingress:
+  host: appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site # TODO: replace with real staging hostname
+
+backend:
+  image:
+    tag: latest
+  env:
+    corsOrigins: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    appBaseUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    apiBaseUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
+
+worker:
+  image:
+    tag: latest
+
+frontend:
+  image:
+    tag: latest
+  env:
+    appUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    apiUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
+    keycloakUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
