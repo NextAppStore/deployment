@@ -340,6 +340,8 @@ services:
       VITE_APP_URL: ${VITE_APP_URL:-http://localhost:5173}
       VITE_KEYCLOAK_URL: ${VITE_KEYCLOAK_URL:-http://localhost:8080}
       VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      # Optional accent colour (#RRGGBB, quoted in .env). Empty = ScholarStack red.
+      VITE_ACCENT_COLOR: ${VITE_ACCENT_COLOR:-}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
       NODE_ENV: development
     ports:

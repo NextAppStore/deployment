@@ -190,6 +190,12 @@ VITE_API_URL=https://<VM-IP>/api
 VITE_KEYCLOAK_URL=https://<VM-IP>
 ```
 
+Optional die Akzentfarbe des Frontends (leer = ScholarStack-Rot). Den Wert in Anführungszeichen setzen, sonst wird `#` als Kommentar gelesen; passende Werte liefert Admin → Plattform-Einstellungen → Erscheinungsbild:
+
+```
+VITE_ACCENT_COLOR="#0052CC"
+```
+
 > [!TIP]
 > Wenn du eine Domain hast und Schritt 3 / Option A (ACME) nutzt, überall `<VM-IP>` durch `<TLS_DOMAIN>` ersetzen.
 
