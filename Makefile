@@ -328,7 +328,7 @@ seed-data: ## Seed Keycloak users + DB (courses, apps, approvals)
 		-e KEYCLOAK_ADMIN_USER=$${KEYCLOAK_ADMIN_USER:-admin} \
 		-e KEYCLOAK_ADMIN_PASSWORD=$${KEYCLOAK_ADMIN_PASSWORD:-admin} \
 		-e REALM_EXPORT_PATH=/tmp/realm-export.json \
-		backend poetry run python /tmp/seed_data.py
+		backend python /tmp/seed_data.py
 
 seed-reset: ## ⚠️  Reset DB + Keycloak realm, then seed
 	@echo "⚠️  WARNING: This will reset the dev DB AND the Keycloak realm!"
@@ -347,26 +347,26 @@ seed-reset: ## ⚠️  Reset DB + Keycloak realm, then seed
 # the Ansible CD pipeline (infrastructure/ansible/staging.yml)
 # — there is no local migrate-deploy target, on purpose.
 migrate-dev: ## Run database migrations (dev) and let the worker role log in
-	$(DC_DEV) exec backend poetry run alembic upgrade head
+	$(DC_DEV) exec backend alembic upgrade head
 	@# The migration creates the worker's DB role (appstore_worker) with its
 	@# column grants; the password comes from WORKER_DB_PASSWORD.
-	$(DC_DEV) exec backend poetry run python scripts/worker_db_role.py
+	$(DC_DEV) exec backend python scripts/worker_db_role.py
 
 migration-create: ## Autogenerate migration (usage: make migration-create MSG="message")
 	@if [ -z "$(MSG)" ]; then \
 		echo "Error: Please provide a message. Usage: make migration-create MSG='Your message'"; \
 		exit 1; \
 	fi
-	$(DC_DEV) exec backend poetry run alembic revision --autogenerate -m "$(MSG)"
+	$(DC_DEV) exec backend alembic revision --autogenerate -m "$(MSG)"
 
 migration-history: ## Show migration history (dev)
-	$(DC_DEV) exec backend poetry run alembic history
+	$(DC_DEV) exec backend alembic history
 
 migration-current: ## Show current migration (dev)
-	$(DC_DEV) exec backend poetry run alembic current
+	$(DC_DEV) exec backend alembic current
 
 migration-downgrade: ## Downgrade by one revision (dev)
-	$(DC_DEV) exec backend poetry run alembic downgrade -1
+	$(DC_DEV) exec backend alembic downgrade -1
 
 # ----------------------------------------------------------------
 # Database Management

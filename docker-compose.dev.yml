@@ -191,9 +191,11 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      # Mount source code for hot reload
+      # Mount source code for hot reload. No `- /app/.venv` shield is
+      # needed (or wanted): the venv lives at /opt/venv in the image, so
+      # this bind mount cannot hide it. The old anonymous volume came up
+      # empty under podman-compose and broke `import uvicorn`.
       - ../backend:/app
-      - /app/.venv
       - backend_git_repos:/tmp/repos
       # Mount shared SSH key for Git operations
       - ssh_keys:/root/.ssh:ro
@@ -246,9 +248,9 @@ services:
       backend:
         condition: service_started
     volumes:
-      # Mount source code for hot reload
+      # Mount source code for hot reload; venv lives at /opt/venv in the
+      # image (see the backend service for the full rationale).
       - ../worker:/app
-      - /app/.venv
       - worker_git_repos:/tmp/worker_repos
       # States OpenTofu could not save (API unreachable for minutes),
       # kept encrypted until `make prod-restore-tfstate` puts them back.
