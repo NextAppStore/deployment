@@ -1,6 +1,6 @@
 # Produktives Setup
 
-Der App Store ist ein Web-System, in dem Studierende und Dozierende vorgefertigte Cloud-Apps (Packer + Terraform in einem Git-Repo) per Klick auf OpenStack ausrollen. In Prod läuft alles auf einer einzelnen Ubuntu-VM in zehn Containern: nginx als TLS-Terminator, Vue-Frontend, FastAPI-Backend, Celery-Worker, Keycloak als Identity Provider sowie PostgreSQL (App + Terraform-State + Keycloak), RabbitMQ und Redis als Infrastruktur. Alle Service-Images werden zur Laufzeit aus GHCR gezogen — auf der VM wird nichts gebaut. Diese Anleitung führt von einer leeren Ubuntu-VM bis zum eingeloggten Browser unter `https://<VM-IP>`.
+Der App Store ist ein Web-System, in dem Studierende und Dozierende vorgefertigte Cloud-Apps (Packer + Terraform in einem Git-Repo) per Klick auf OpenStack ausrollen. In Prod läuft alles auf einer einzelnen Ubuntu-VM in sieben Containern: nginx als TLS-Terminator, Vue-Frontend, FastAPI-Backend, Worker, Keycloak als Identity Provider sowie PostgreSQL (App inkl. Job-Queue und OpenTofu-State, plus eine eigene Instanz für Keycloak). Alle Service-Images werden zur Laufzeit aus GHCR gezogen — auf der VM wird nichts gebaut. Diese Anleitung führt von einer leeren Ubuntu-VM bis zum eingeloggten Browser unter `https://<VM-IP>`.
 
 > [!TIP]
 > Im CI-Betrieb läuft der Staging-Stack automatisch über
@@ -79,7 +79,7 @@ Alle weiteren Befehle werden aus `/opt/app-store/deployment` ausgeführt — dor
 ## Schritt 2: `.env` anlegen
 
 > [!TIP]
-> Auf Anfrage stellen wir eine fertig befüllte `.env` bereit. In dem Fall genügt es, die Datei direkt nach `deployment/.env` zu legen, alle Vorkommen von `<VM-IP>` durch die IP der VM zu ersetzen, auf der der App Store läuft — und mit Schritt 3 weiterzumachen. Die folgenden Unterpunkte 2a–2j sind dann nicht nötig.
+> Auf Anfrage stellen wir eine fertig befüllte `.env` bereit. In dem Fall genügt es, die Datei direkt nach `deployment/.env` zu legen, alle Vorkommen von `<VM-IP>` durch die IP der VM zu ersetzen, auf der der App Store läuft — und mit Schritt 3 weiterzumachen. Die folgenden Unterpunkte 2a–2i sind dann nicht nötig.
 
 `docker-compose.prod.yml` markiert sämtliche kritischen Werte als `${VAR:?... is required}` — der Stack startet erst, wenn jeder Pflicht-Wert gesetzt ist. Anders als in Dev gibt es keine `.env.example` mit Defaults; jede Variable muss explizit gefüllt werden.
 
@@ -96,31 +96,21 @@ Im Folgenden verwende ich `<VM-IP>` als Platzhalter — ersetze ihn überall dur
 
 ### 2b. Datenbank-Credentials (Pflicht)
 
-Drei voneinander isolierte Postgres-Instanzen — Anwendung, Terraform-State (Worker), Keycloak. Jede bekommt eigene Credentials. Passwörter generieren mit `openssl rand -base64 24`.
+Zwei voneinander isolierte Postgres-Instanzen — Anwendung und Keycloak. Die Anwendungs-DB ist zugleich die Job-Queue und hält den OpenTofu-State. Der Worker meldet sich dort mit einer eigenen Rolle (`appstore_worker`) an, die nur die Queue-Spalten von `tasks`/`task_events` sehen darf; ihr Passwort ist `WORKER_DB_PASSWORD`. Passwörter generieren mit `openssl rand -base64 24`.
 
 ```
 DB_USER=appstore
 DB_PASSWORD=<random>
 DB_NAME=appstore
 
-TFSTATE_DB_USER=tfstate
-TFSTATE_DB_PASSWORD=<random>
-TFSTATE_DB_NAME=tfstate
+WORKER_DB_PASSWORD=<random>
 
 KEYCLOAK_DB_USER=keycloak
 KEYCLOAK_DB_PASSWORD=<random>
 KEYCLOAK_DB_NAME=keycloak
 ```
 
-### 2c. RabbitMQ-Credentials (Pflicht)
-
-```
-RABBITMQ_USER=appstore
-RABBITMQ_PASSWORD=<random>
-RABBITMQ_VHOST=/
-```
-
-### 2d. Keycloak-Admin (Pflicht)
+### 2c. Keycloak-Admin (Pflicht)
 
 ```
 KEYCLOAK_ADMIN_USER=admin
@@ -129,7 +119,7 @@ KEYCLOAK_ADMIN_PASSWORD=<random>
 
 Der Admin-User wird beim ersten Keycloak-Boot im `master`-Realm angelegt — danach lässt sich das Passwort ohne DB-Reset nicht mehr ändern. Den Wert gut sichern.
 
-### 2e. `SECRET_KEY` (Pflicht)
+### 2d. `SECRET_KEY` (Pflicht)
 
 Symmetrischer Schlüssel für die Backend-JWTs. In Dev hat dieser Wert einen Default — in Prod muss er explizit gesetzt werden.
 
@@ -141,7 +131,7 @@ python3 -c 'import secrets; print(secrets.token_hex(32))'
 SECRET_KEY=<output>
 ```
 
-### 2f. `CREDENTIAL_ENCRYPTION_KEY` (Pflicht, sonst startet der Stack nicht)
+### 2e. `CREDENTIAL_ENCRYPTION_KEY` (Pflicht, sonst startet der Stack nicht)
 
 Symmetrischer Fernet-Key, den Backend und Worker teilen, um OpenStack-Credentials zu ver-/entschlüsseln. Beim Container-Start wird er zwingend geprüft — fehlt er, bricht `docker compose up` mit der Meldung `CREDENTIAL_ENCRYPTION_KEY is required` ab.
 
@@ -159,7 +149,7 @@ Falls `cryptography` lokal nicht installiert ist:
 pip install cryptography
 ```
 
-### 2g. `KEYCLOAK_CLIENT_SECRET` (Pflicht für Login)
+### 2f. `KEYCLOAK_CLIENT_SECRET` (Pflicht für Login)
 
 Das Secret kann erst nach dem ersten Keycloak-Start aus dem Admin-UI geholt werden. Für den Erst-Start in `.env` einfach einen Platzhalter eintragen:
 
@@ -169,7 +159,7 @@ KEYCLOAK_CLIENT_SECRET=changeme
 
 In Schritt 6 wird der echte Wert nachgetragen.
 
-### 2h. `GIT_ACCESS_TOKEN` (Pflicht)
+### 2g. `GIT_ACCESS_TOKEN` (Pflicht)
 
 GitHub Personal Access Token mit `repo`-Scope. Wird vom Worker beim Klonen privater App-Repos und vom Backend für Hook-Verifikation verwendet. Anlegen unter: GitHub → Settings → Developer settings → Personal access tokens (classic) → Generate new token.
 
@@ -177,7 +167,7 @@ GitHub Personal Access Token mit `repo`-Scope. Wird vom Worker beim Klonen priva
 GIT_ACCESS_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-### 2i. URLs (Pflicht)
+### 2h. URLs (Pflicht)
 
 Alle URLs zeigen auf deine VM. nginx terminiert HTTPS auf 443 und routet `/api` an das Backend, `/realms` und `/admin` an Keycloak, alles andere an das Frontend — deshalb laufen alle drei `VITE_*_URL`-Werte über dieselbe Origin:
 
@@ -199,7 +189,7 @@ VITE_ACCENT_COLOR="#0052CC"
 > [!TIP]
 > Wenn du eine Domain hast und Schritt 3 / Option A (ACME) nutzt, überall `<VM-IP>` durch `<TLS_DOMAIN>` ersetzen.
 
-### 2j. `SMTP_*` (optional)
+### 2i. `SMTP_*` (optional)
 
 E-Mail-Benachrichtigungen (Approval-Workflow). Wenn nicht gebraucht, einfach `SMTP_ENABLED=false` lassen und die anderen Felder leer. Für Gmail ein App-Password verwenden, nicht das Account-Passwort.
 
@@ -239,7 +229,7 @@ make prod-cert-acme
 
 Das Target installiert `acme.sh` (idempotent), schreibt den TSIG-Key nach `~/.acme-dns/tsig.key`, registriert den ACME-Account und stellt ein Zertifikat für `TLS_DOMAIN` (+ die `www.`-Variante) per DNS-01 (`nsupdate` gegen `ns.cloud-ns.dhbw-mannheim.de.`) beim DHBW-Server (`https://certificates.dhbw.cloud`) aus. Ergebnis landet direkt unter `nginx/certs/` — kein Browser-Warnhinweis mehr, da der Server-Betreiber (DHBW) als CA vertraut ist. Erneuerung läuft automatisch über den von `acme.sh` angelegten Cronjob; `make prod-cert-acme` erneut ausführen reicht als manueller Trigger.
 
-Mit dieser Option **`APP_BASE_URL`, `CORS_ORIGINS` und die drei `VITE_*_URL`-Werte in Schritt 2i auf `https://<TLS_DOMAIN>` setzen statt auf `https://<VM-IP>`.**
+Mit dieser Option **`APP_BASE_URL`, `CORS_ORIGINS` und die drei `VITE_*_URL`-Werte in Schritt 2h auf `https://<TLS_DOMAIN>` setzen statt auf `https://<VM-IP>`.**
 
 ### Option B: Self-signed-Zertifikat (Fallback, wenn nur eine IP verfügbar ist)
 
@@ -262,7 +252,7 @@ Browser zeigen beim ersten Aufruf eine Sicherheitswarnung („Verbindung nicht s
 make prod-up
 ```
 
-Anders als in Dev wird hier nichts gebaut — das Target lädt zunächst alle `:latest`-Images aus GHCR (`pull_policy: always`) und startet danach die zehn Container: `nginx`, `frontend`, `backend`, `worker`, `keycloak`, `keycloak-postgres`, `postgres`, `postgres-tfstate`, `redis`, `rabbitmq`. Erstdurchlauf dauert je nach Bandbreite 2–5 Minuten.
+Anders als in Dev wird hier nichts gebaut — das Target lädt zunächst alle `:latest`-Images aus GHCR (`pull_policy: always`) und startet danach die sieben Container: `nginx`, `frontend`, `backend`, `worker`, `keycloak`, `keycloak-postgres`, `postgres`. Erstdurchlauf dauert je nach Bandbreite 2–5 Minuten.
 
 Status prüfen:
 
@@ -270,7 +260,7 @@ Status prüfen:
 make prod-ps
 ```
 
-Alle zehn Container sollten `running (healthy)` melden, sobald die Healthchecks durchlaufen sind. Falls ein Container im Crash-Loop steckt, gezielt die Logs anschauen (in Prod gibt es keine `dev-logs-<svc>`-Aliasse, der Dienst wird per `SVC=` mitgegeben):
+Alle sieben Container sollten `running (healthy)` melden, sobald die Healthchecks durchlaufen sind. Falls ein Container im Crash-Loop steckt, gezielt die Logs anschauen (in Prod gibt es keine `dev-logs-<svc>`-Aliasse, der Dienst wird per `SVC=` mitgegeben):
 
 ```bash
 make prod-logs SVC=backend
@@ -299,6 +289,8 @@ Anders als in Dev sind Migrationen in Prod kein Teilschritt des Seeds, sondern e
 ```bash
 make prod-migrate
 ```
+
+Das Target legt auch die Datenbank-Rolle des Workers (`appstore_worker`) an und setzt ihr Passwort aus `WORKER_DB_PASSWORD` (`scripts/worker_db_role.py`). Bis dahin meldet der Worker im Log, dass er sich nicht verbinden kann, und versucht es weiter — danach verbindet er sich von selbst.
 
 Seed-Daten einspielen (Realm-Import, Test-User, Beispiel-Apps, Kurse):
 
@@ -333,7 +325,7 @@ Der mit Schritt 5 importierte Realm bringt den `appstore-backend`-Client mit dem
 Anders als in Dev entfällt der Vorlauf mit `make keycloak-disable-ssl` — nginx terminiert HTTPS schon, der `master`-Realm akzeptiert die Admin-UI direkt.
 
 1. `https://<VM-IP>/admin` im Browser öffnen (Cert-Warnung akzeptieren).
-2. Mit `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` aus Schritt 2d einloggen.
+2. Mit `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` aus Schritt 2c einloggen.
 3. Oben links im Realm-Switcher von `master` auf `dhbw` umstellen.
 4. Links auf "Clients" → `appstore-backend` öffnen.
 5. Reiter "Credentials" → Button **"Regenerate"** klicken (das Feld zeigt vorher buchstäblich `**********` — das ist die Maskierung aus dem Realm-Export, kein nutzbarer Wert).
@@ -368,10 +360,10 @@ Oder im Browser einzeln öffnen:
 | Frontend | `https://<VM-IP>` | Click-n-Deploy Login-Seite |
 | Backend Swagger | `https://<VM-IP>/api/docs` | OpenAPI-UI mit Endpoints `/users`, `/apps`, `/deployments` |
 | Backend Health | `https://<VM-IP>/api/health` | `{"status":"ok"}` |
-| Keycloak Admin | `https://<VM-IP>/admin` | Keycloak Welcome, Login mit `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` aus Schritt 2d |
+| Keycloak Admin | `https://<VM-IP>/admin` | Keycloak Welcome, Login mit `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` aus Schritt 2c |
 | Keycloak OIDC Discovery | `https://<VM-IP>/realms/dhbw/.well-known/openid-configuration` | JSON mit `issuer: https://<VM-IP>/realms/dhbw` |
 
-RabbitMQ-UI und pgAdmin sind in Prod nicht über nginx exponiert (kein Port-Mapping nach außen); für Debugging per Container-Shell oder SSH-Tunnel zugreifen.
+pgAdmin ist in Prod nicht über nginx exponiert (kein Port-Mapping nach außen); für Debugging per Container-Shell oder SSH-Tunnel zugreifen.
 
 ## Login
 
@@ -415,7 +407,7 @@ Hinweise zur E-Mail-Konvention: `<vorname>.<nachname>@dhbw.de`, alles klein, Uml
 make prod-down
 ```
 
-Container weg, Volumes (DBs, Keycloak-Daten, RabbitMQ) bleiben. Beim nächsten `make prod-up` startet alles im Zustand vor dem Stopp.
+Container weg, Volumes (DBs, Keycloak-Daten) bleiben. Beim nächsten `make prod-up` startet alles im Zustand vor dem Stopp.
 
 ### Nur pausieren (schnellster Re-Start)
 
@@ -433,6 +425,18 @@ make prod-restart SVC=backend
 make prod-restart SVC=frontend
 make prod-restart SVC=worker
 ```
+
+Das Backend lässt sich auch neu starten, während ein Deployment-Job läuft. OpenTofu wiederholt den Zugriff auf den State einige Minuten lang (`WORKER_STATE_RETRY_*`). Danach versucht der Worker weiter, den State hochzuladen, und bewahrt ihn notfalls verschlüsselt auf (siehe „OpenTofu-State konnte nicht gespeichert werden“). Am saubersten ist es trotzdem, laufende Jobs abzuwarten: `SELECT count(*) FROM tasks WHERE status = 'RUNNING'`. Das Staging-Playbook wartet darauf bis zu 10 Minuten.
+
+### OpenTofu-State konnte nicht gespeichert werden
+
+Selten, nur wenn das Backend am Ende eines Applies oder Destroys **mehrere Minuten** nicht erreichbar war. Das Task-Log (oder beim Start des Workers sein Log) meldet dann: „State could NOT be saved; an encrypted copy is kept on the worker at /var/lib/appstore-worker/rescued-state/<datei>.tfstate.enc“. Die Ressourcen existieren in OpenStack, der State im Backend weiß aber noch nichts davon. **Bevor das Deployment erneut angefasst wird**, die Kopie zurückspielen:
+
+```bash
+make prod-restore-tfstate DEPLOYMENT=<deployment-uuid> FILE=/var/lib/appstore-worker/rescued-state/<datei>.tfstate.enc
+```
+
+Das Skript verweigert, einen gleich neuen oder neueren State zu überschreiben, oder solange ein Job den State sperrt. `FORCE=1` überschreibt trotzdem. Nur mit Bedacht einsetzen. Danach die Datei im Worker löschen: `docker exec worker-prod rm <datei>`. Der Worker meldet beim Start alle Kopien, die noch nicht zurückgespielt wurden.
 
 ### Images neu ziehen (nach GHCR-Release)
 

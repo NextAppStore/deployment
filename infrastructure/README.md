@@ -163,8 +163,8 @@ created per-run and removed in the workflow's cleanup step.
    the `DNS_TSIG_KEY` / `ACME_ACCOUNT_EMAIL` secrets, renewed automatically by acme.sh's own
    cron job); otherwise falls back to a self-signed cert on first run (idempotent either way).
 6. Runs `community.docker.docker_compose_v2` with `pull: always` against
-   `docker-compose.staging.yml` — the full standalone stack (postgres, postgres-tfstate, rabbitmq,
-   redis, keycloak + its postgres, backend, worker, frontend, nginx). The explicit `files:` list
+   `docker-compose.staging.yml` — the full standalone stack (postgres — also the job queue and the
+   OpenTofu state —, keycloak + its postgres, backend, worker, frontend, nginx). The explicit `files:` list
    keeps the local-dev `docker-compose.override.yml` from ever being applied to a server.
 7. Waits for the backend container, runs Alembic migrations as an explicit task, and reloads
    nginx as a safety net for bind-mounted config changes.

@@ -5,7 +5,8 @@
 
 services:
   # ----------------------------------------------------------------
-  # PostgreSQL Database (Backend)
+  # PostgreSQL Database (Backend) — also the job queue and the
+  # OpenTofu state; the only infrastructure backend and worker share
   # ----------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
@@ -55,31 +56,6 @@ services:
       retries: 5
     networks:
       - backend-network
-    restart: unless-stopped
-
-  # ----------------------------------------------------------------
-  # PostgreSQL Database (Terraform Remote State)
-  # ----------------------------------------------------------------
-  # Worker-only Postgres for Terraform's `pg` backend. Deliberately
-  # isolated from the application DB: the worker must never reach the
-  # backend's data, only its own state store. One schema per deployment
-  # (`deployment_<uuid>`) keeps the locking/state surface tight.
-  postgres-tfstate:
-    image: postgres:16-alpine
-    container_name: postgres-tfstate-dev
-    environment:
-      POSTGRES_USER: ${TFSTATE_DB_USER:-terraform}
-      POSTGRES_PASSWORD: ${TFSTATE_DB_PASSWORD:-terraform}
-      POSTGRES_DB: ${TFSTATE_DB_NAME:-tfstate}
-    volumes:
-      - postgres_tfstate_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${TFSTATE_DB_USER:-terraform}"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    networks:
-      - worker-network
     restart: unless-stopped
 
   # ----------------------------------------------------------------
@@ -137,53 +113,6 @@ services:
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # RabbitMQ (Message Broker)
-  # ----------------------------------------------------------------
-  rabbitmq:
-    image: rabbitmq:3.13-management-alpine
-    container_name: rabbitmq-dev
-    hostname: rabbitmq-dev
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-admin}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
-    ports:
-      - "${RABBITMQ_PORT:-5672}:5672"
-      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
-    volumes:
-      - rabbitmq_dev_data:/var/lib/rabbitmq
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - backend-network
-      - worker-network
-    restart: unless-stopped
-
-  # ----------------------------------------------------------------
-  # Redis (Result Backend for Celery)
-  # ----------------------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: redis-dev
-    hostname: redis-dev
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redis_dev_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - backend-network
-      - worker-network
-    restart: unless-stopped
-
-  # ----------------------------------------------------------------
   # Backend API (FastAPI) - Development with Hot Reload
   # ----------------------------------------------------------------
   backend:
@@ -201,10 +130,10 @@ services:
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
       
-      # Celery
-      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/${RABBITMQ_VHOST:-/}
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
-      
+      # Password of the worker's database role (appstore_worker); set by
+      # `make migrate-dev` (scripts/worker_db_role.py after alembic).
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-worker}
+
       # Git
       GIT_ACCESS_TOKEN: ${GIT_ACCESS_TOKEN:-}
       
@@ -225,9 +154,6 @@ services:
       LTI_CLIENT_ID: ${LTI_CLIENT_ID:-}
       LTI_DEPLOYMENT_ID: ${LTI_DEPLOYMENT_ID:-}
       LTI_SESSION_SECRET: ${LTI_SESSION_SECRET:-}
-      # Shared OIDC state/nonce store (see app/utils/lti_auth.py) — same
-      # redis service Celery uses, different DB index (db 1 vs. db 0).
-      LTI_NONCE_REDIS_URL: ${LTI_NONCE_REDIS_URL:-redis://redis:6379/1}
 
       # Public URL of this API, used to build the LTI redirect_uri sent
       # to Moodle. In dev the backend is reachable directly on
@@ -239,7 +165,7 @@ services:
       CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]}'
 
       # Email (Gmail SMTP) — used by the post-deploy notify hook in
-      # celery_event_listener.py. SMTP_ENABLED is the explicit
+      # services/task_finalizer.py (sent once per deploy). SMTP_ENABLED is the explicit
       # kill-switch (default false): even with SMTP_USER/SMTP_PASSWORD
       # populated, mail delivery only happens when SMTP_ENABLED=true.
       # Use it to keep credentials in .env for later but turn delivery
@@ -264,23 +190,29 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     volumes:
-      # Mount source code for hot reload
+      # Mount source code for hot reload. No `- /app/.venv` shield is
+      # needed (or wanted): the venv lives at /opt/venv in the image, so
+      # this bind mount cannot hide it. The old anonymous volume came up
+      # empty under podman-compose and broke `import uvicorn`.
       - ../backend:/app
-      - /app/.venv
       - backend_git_repos:/tmp/repos
       # Mount shared SSH key for Git operations
       - ssh_keys:/root/.ssh:ro
     networks:
       - frontend-network
       - backend-network
+      # The worker reaches /internal/tfstate (OpenTofu's state backend)
+      # over this network.
+      - worker-network
     restart: unless-stopped
 
   # ----------------------------------------------------------------
-  # Worker Service (Celery) - Development
+  # Worker Service (Postgres job queue) - Development
   # ----------------------------------------------------------------
+  # Claims jobs from the `tasks` table as the restricted
+  # `appstore_worker` role (LISTEN task_queued + SKIP LOCKED); OpenTofu
+  # keeps the state in the backend via /internal/tfstate.
   worker:
     build:
       context: ../worker
@@ -294,16 +226,16 @@ services:
       - 8.8.8.8
       - 8.8.4.4
     environment:
-      # Celery
-      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin}@rabbitmq:5672/${RABBITMQ_VHOST:-/}
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      # Job queue: the application DB, as the restricted worker role
+      # (password set by `make migrate-dev`).
+      DATABASE_URL: postgresql://appstore_worker:${WORKER_DB_PASSWORD:-worker}@postgres:5432/${DB_NAME:-backend_dev}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
 
-      # OpenStack credential decryption (must match backend)
+      # OpenTofu state backend (/internal/tfstate) on the backend.
+      APPSTORE_API_URL: http://backend:8000
+
+      # Job payload / OpenStack credential decryption (must match backend)
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
-
-      # Terraform pg backend — isolated DB, NOT the application DB.
-      # Worker uses one schema per deployment (deployment_<uuid>).
-      TFSTATE_DATABASE_URL: postgresql://${TFSTATE_DB_USER:-terraform}:${TFSTATE_DB_PASSWORD:-terraform}@postgres-tfstate:5432/${TFSTATE_DB_NAME:-tfstate}?sslmode=disable
 
       # Git
       GIT_ACCESS_TOKEN: ${GIT_ACCESS_TOKEN:-}
@@ -311,17 +243,18 @@ services:
       # Application
       DEBUG: "True"
     depends_on:
-      rabbitmq:
+      postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      postgres-tfstate:
-        condition: service_healthy
+      backend:
+        condition: service_started
     volumes:
-      # Mount source code for hot reload
+      # Mount source code for hot reload; venv lives at /opt/venv in the
+      # image (see the backend service for the full rationale).
       - ../worker:/app
-      - /app/.venv
       - worker_git_repos:/tmp/worker_repos
+      # States OpenTofu could not save (API unreachable for minutes),
+      # kept encrypted until `make prod-restore-tfstate` puts them back.
+      - worker_rescued_state:/var/lib/appstore-worker/rescued-state
       # Mount shared SSH key for Git operations
       - ssh_keys:/root/.ssh:ro
     networks:
@@ -384,17 +317,13 @@ volumes:
     driver: local
   postgres_test_data:
     driver: local
-  postgres_tfstate_data:
-    driver: local
   keycloak_postgres_data:
-    driver: local
-  rabbitmq_dev_data:
-    driver: local
-  redis_dev_data:
     driver: local
   backend_git_repos:
     driver: local
   worker_git_repos:
+    driver: local
+  worker_rescued_state:
     driver: local
   ssh_keys:
     driver: local
