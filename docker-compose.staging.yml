@@ -447,6 +447,8 @@ services:
       VITE_KEYCLOAK_CLIENT_ID: ${VITE_KEYCLOAK_CLIENT_ID:-appstore-frontend}
       VITE_APP_URL: ${VITE_APP_URL:?VITE_APP_URL is required}
       VITE_API_URL: ${VITE_API_URL:?VITE_API_URL is required}
+      # Optional accent colour (#RRGGBB, quoted in .env). Empty = ScholarStack red.
+      VITE_ACCENT_COLOR: ${VITE_ACCENT_COLOR:-}
     depends_on:
       backend:
         condition: service_healthy
