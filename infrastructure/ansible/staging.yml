@@ -22,6 +22,12 @@
       ip6tables: true
 
   pre_tasks:
+    - name: Unused Docker images aufräumen
+      community.docker.docker_prune:
+        images: yes
+        images_filters:
+          dangling: false
+
     - name: Verzeichnis für App erstellen
       ansible.builtin.file:
         path: "{{ project_root }}"
@@ -443,6 +449,21 @@
         pull: never
         state: present
       register: compose_output
+
+    # docker_compose_v2's `depends_on: condition: service_healthy` only
+    # orders *initial* container creation — it does not restart keycloak
+    # when keycloak-postgres gets recreated (same config, new container
+    # after a volume/image change elsewhere in the stack). Keycloak then
+    # keeps its JDBC connection open to the now-dead old Postgres
+    # container, which fails the next Admin API call with the opaque
+    # "null [unknown_error]". Restarting keycloak-prod unconditionally
+    # here is cheap and idempotent, and guarantees a fresh DB connection
+    # before we touch its API below.
+    - name: keycloak-prod neu starten (frische DB-Verbindung erzwingen)
+      community.docker.docker_container:
+        name: keycloak-prod
+        state: started
+        restart: true
 
     # Keycloak only imports realm-export.json on first boot with an empty
     # DB (persisted in keycloak_postgres_prod_data) — on every later deploy

@@ -25,7 +25,7 @@
 # ----------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------
-DOCKER  := $(shell command -v docker 2>/dev/null || command -v podman)
+DOCKER  := $(shell command -v podman 2>/dev/null || command -v docker)
 DC_DEV  := $(DOCKER) compose -f docker-compose.dev.yml
 DC_PROD := $(DOCKER) compose -f docker-compose.prod.yml
 

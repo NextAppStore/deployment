@@ -122,7 +122,7 @@ services:
     container_name: backend-dev
     environment:
       # Database
-      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-backend_dev}
+      DATABASE_URL: postgresql+psycopg2://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-backend_dev}
       
       # Security
       SECRET_KEY: ${SECRET_KEY:-dev-secret-key-12345}
