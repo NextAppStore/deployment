@@ -13,7 +13,7 @@
 # that workflow's header comment), so it only ever bumps backend's tag.
 
 global:
-  namespace: appstore
+  namespace: appstore-staging
 
 ingress:
   host: appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site # TODO: replace with real staging hostname

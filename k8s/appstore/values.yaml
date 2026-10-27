@@ -13,7 +13,7 @@ global:
   # Namespace all resources are deployed into. ArgoCD Applications normally
   # set destination.namespace instead, but resources reference this value
   # directly for cross-resource DNS (e.g. DATABASE_URL host).
-  namespace: appstore
+  namespace: appstore-staging
 
 ingress:
   enabled: true
