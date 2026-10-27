@@ -448,6 +448,7 @@
         files: ["docker-compose.staging.yml"]
         pull: never
         state: present
+        remove_orphans: true
       register: compose_output
 
     # docker_compose_v2's `depends_on: condition: service_healthy` only
