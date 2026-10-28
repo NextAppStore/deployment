@@ -69,14 +69,15 @@ spec:
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
           command: ["python", "/app/seed/seed_data.py"]
           env:
-            - name: DATABASE_URL
-              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            # $(VAR) only resolves a var declared EARLIER in this list.
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
             - name: DB_PASSWORD
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD } }
             - name: DB_NAME
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
             - name: KEYCLOAK_SERVER_URL
               value: {{ .Values.backend.env.keycloakServerUrl | quote }}
             - name: KEYCLOAK_REALM

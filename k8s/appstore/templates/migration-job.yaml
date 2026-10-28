@@ -23,14 +23,15 @@ spec:
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
           command: ["python", "-m", "alembic", "upgrade", "head"]
           env:
-            - name: DATABASE_URL
-              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            # $(VAR) only resolves a var declared EARLIER in this list.
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
             - name: DB_PASSWORD
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD } }
             - name: DB_NAME
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
 ---
 # The migration above creates the worker's database role (appstore_worker)
 # with its column grants but no password; this Job sets that password from
@@ -58,14 +59,15 @@ spec:
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
           command: ["python", "scripts/worker_db_role.py"]
           env:
-            - name: DATABASE_URL
-              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            # $(VAR) only resolves a var declared EARLIER in this list.
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
             - name: DB_PASSWORD
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD } }
             - name: DB_NAME
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
             - name: WORKER_DB_PASSWORD
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: WORKER_DB_PASSWORD } }
 {{- end }}

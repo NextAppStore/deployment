@@ -114,11 +114,16 @@ spec:
           env:
             - name: KC_DB
               value: postgres
-            - name: KC_DB_URL
-              value: "jdbc:postgresql://keycloak-postgres:5432/$(KEYCLOAK_DB_NAME)"
+            # $(VAR) only resolves a var declared EARLIER in this list —
+            # KEYCLOAK_DB_NAME must come before KC_DB_URL references it,
+            # or Kubernetes passes the literal text "$(KEYCLOAK_DB_NAME)"
+            # through unexpanded (confirmed: this exact bug caused
+            # `FATAL: database "$(KEYCLOAK_DB_NAME)" does not exist`).
             - name: KEYCLOAK_DB_NAME
               valueFrom:
                 secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_NAME }
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://keycloak-postgres:5432/$(KEYCLOAK_DB_NAME)"
             - name: KC_DB_USERNAME
               valueFrom:
                 secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_DB_USER }
