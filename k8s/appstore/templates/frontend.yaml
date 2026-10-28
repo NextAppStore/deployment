@@ -1,5 +1,10 @@
 # Frontend (Vue 3 SPA, served by nginx inside the image). Mirrors the
 # `frontend` service in docker-compose.staging.yml.
+#
+# sync-wave "3": no DB dependency of its own, but kept in the same wave
+# as backend/worker (see migration-job.yaml for the wave plan) for
+# simplicity — there's no harm in it waiting slightly longer than
+# strictly necessary.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,6 +12,8 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   labels:
     {{- include "appstore.selectorLabels" "frontend" | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   replicas: {{ .Values.frontend.replicas }}
   selector:

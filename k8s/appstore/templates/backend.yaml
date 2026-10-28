@@ -1,7 +1,12 @@
 # Backend API (FastAPI). Mirrors the `backend` service in
 # docker-compose.staging.yml. DB migrations are NOT run here — see
-# migration-job.yaml (ArgoCD PostSync hook), same separation-of-concerns
-# reasoning as the dedicated Ansible task it replaces.
+# migration-job.yaml, same separation-of-concerns reasoning as the
+# dedicated Ansible task it replaces.
+#
+# sync-wave "3": must start strictly after migration-job.yaml's two Jobs
+# (waves 1-2) — backend's background reaper (task_finalizer.py) crashes
+# the whole process if the `tasks` table doesn't exist yet, so the
+# schema has to land before this pod's first boot, not just "eventually."
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,6 +14,8 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   labels:
     {{- include "appstore.selectorLabels" "backend" | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   replicas: {{ .Values.backend.replicas }}
   selector:

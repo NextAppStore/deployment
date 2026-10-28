@@ -1,9 +1,34 @@
-# Runs `python -m alembic upgrade head` as an ArgoCD PostSync hook — kept
-# as its own Job (not a backend initContainer) for the same reason the
-# Ansible playbook runs it as a dedicated step rather than inside compose:
-# migration failures must surface directly in the hook's own log/status,
-# not be buried inside a container-start retry loop. hook-delete-policy
-# removes the completed Job so re-syncs don't collide with a stale name.
+# Runs `python -m alembic upgrade head`, ordered via ArgoCD sync-wave
+# (NOT a PostSync hook) so it completes BEFORE backend's Deployment ever
+# starts a pod. This is load-bearing: backend's task_finalizer.py runs a
+# background reaper against the `tasks` table on every boot, and an
+# unhandled exception there kills the whole process (confirmed in
+# testing — backend crash-looped forever because the migration, as a
+# PostSync hook, never got to run: ArgoCD only fires PostSync once the
+# sync is healthy, but backend could never BECOME healthy without the
+# schema existing first — a deadlock).
+#
+# Sync-wave plan for this chart:
+#   0 (default, unset) — postgres, keycloak-postgres, keycloak, PVCs
+#   1                  — appstore-migrate (this file)
+#   2                  — appstore-worker-db-role (this file) — needs the
+#                        appstore_worker role the migration just created,
+#                        so it must wait for wave 1 to finish, not run
+#                        alongside it
+#   3                  — backend/worker/frontend Deployments (see their
+#                        sync-wave annotations)
+# ArgoCD waits for every resource in a wave to be healthy ("Completed"
+# for a Job) before starting the next wave — on a fresh cluster this
+# also correctly waits for Postgres itself to come up first, since
+# wave 0 is applied and awaited before wave 1 begins.
+#
+# Kept as its own Job (not a backend initContainer) for the same reason
+# the Ansible playbook runs it as a dedicated step rather than inside
+# compose: migration failures must surface directly in the Job's own
+# log/status, not be buried inside a container-start retry loop.
+# ttlSecondsAfterFinished lets Kubernetes garbage-collect the completed
+# Job automatically, so a later sync can create a fresh one under the
+# same name without a manual delete first.
 {{- if .Values.migration.enabled }}
 apiVersion: batch/v1
 kind: Job
@@ -11,10 +36,10 @@ metadata:
   name: appstore-migrate
   namespace: {{ .Values.global.namespace }}
   annotations:
-    argocd.argoproj.io/hook: PostSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   backoffLimit: 2
+  ttlSecondsAfterFinished: 300
   template:
     spec:
       restartPolicy: Never
@@ -34,23 +59,21 @@ spec:
               value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
 ---
 # The migration above creates the worker's database role (appstore_worker)
-# with its column grants but no password; this Job sets that password from
-# WORKER_DB_PASSWORD, mirroring the dedicated Ansible step that runs
+# with its column grants but no password; this Job sets that password
+# from WORKER_DB_PASSWORD, mirroring the dedicated Ansible step that runs
 # `docker exec backend-prod python scripts/worker_db_role.py` right after
-# `alembic upgrade head`. sync-wave "1" (after the default-wave migration
-# Job above) guarantees the role exists before this runs; the worker
-# Deployment itself just retries its DB connection until this has landed.
+# `alembic upgrade head`. sync-wave "2" (one after appstore-migrate's "1")
+# guarantees the role already exists before this runs.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: appstore-worker-db-role
   namespace: {{ .Values.global.namespace }}
   annotations:
-    argocd.argoproj.io/hook: PostSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   backoffLimit: 2
+  ttlSecondsAfterFinished: 300
   template:
     spec:
       restartPolicy: Never

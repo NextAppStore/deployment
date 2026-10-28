@@ -9,6 +9,10 @@
 # with a per-task token (blocked from public ingress — see ingress.yaml),
 # not a direct DB connection, so the worker no longer needs its own
 # postgres-tfstate service or isolated network segment for that purpose.
+# sync-wave "3": must start strictly after migration-job.yaml's two
+# Jobs (waves 1-2) — specifically after appstore-worker-db-role (wave 2)
+# sets the appstore_worker role's password, or this Deployment's
+# DATABASE_URL connection fails auth on every boot.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,6 +20,8 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   labels:
     {{- include "appstore.selectorLabels" "worker" | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
 spec:
   replicas: {{ .Values.worker.replicas }}
   selector:

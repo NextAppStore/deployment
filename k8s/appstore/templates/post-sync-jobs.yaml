@@ -17,8 +17,13 @@
 # instead of being injected via ConfigMap. One seed/ folder, no sync step,
 # no drift risk — see k8s-deploy.yml for the copy step.
 #
-# Both run after appstore-migrate (same sync-wave) since they depend on
-# the schema existing; relative ordering between the two of them doesn't
+# Both stay as PostSync hooks (unlike appstore-migrate/appstore-worker-
+# db-role, moved to plain sync-waves — see migration-job.yaml for why):
+# they need Keycloak itself up and serving its Admin API, and Keycloak
+# is a normal wave-0 resource, so "after the whole sync is healthy" is
+# the right gate here, not a wave number. They also need the schema,
+# but by PostSync time wave 1-3 have already completed, so that's
+# already satisfied. Relative ordering between the two of them doesn't
 # matter (seed_data.py only reads Keycloak, doesn't touch client URLs).
 apiVersion: batch/v1
 kind: Job
