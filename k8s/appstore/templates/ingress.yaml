@@ -1,95 +1,72 @@
 # Replaces the nginx reverse-proxy container + its hand-maintained TLS
-# cert provisioning (nginx/nginx.conf + the Ansible self-signed/ACME logic).
-# TLS termination and cert issuance are delegated to the Ingress
-# controller + cert-manager already running on the cluster; this chart
-# only declares intent via the secretName / cert-manager annotation.
+# cert provisioning (nginx/nginx.conf + the Ansible self-signed/ACME
+# logic). This cluster runs Traefik (confirmed via `kubectl get crd |
+# grep traefik` -> ingressroutes.traefik.io / middlewares.traefik.io,
+# apiVersion traefik.io/v1alpha1) with ExternalDNS + a wildcard cert for
+# *.cluster.<student>.users.dhbw.site — any Ingress/IngressRoute host
+# under that zone gets a DNS record and HTTPS automatically, no
+# cert-manager annotation or secretName needed (see values.yaml ingress.host).
 #
-# Path routing mirrors nginx/nginx.conf:
-#   /api/internal/                         -> 404 (worker-only, reached
-#                                              directly over the cluster
-#                                              network — see networkpolicy.yaml
-#                                              allow-to-backend — never via
-#                                              this public Ingress; must
-#                                              precede /api/ below)
+# Plain networking.k8s.io/v1 Ingress annotations are nginx-specific
+# (rewrite-target, configuration-snippet) and silently no-op on Traefik,
+# so this uses Traefik's native IngressRoute + Middleware CRDs instead,
+# which support prefix-stripping and routing priority directly.
+#
+# Path routing mirrors nginx/nginx.conf, with one deliberate difference:
+# nginx.conf adds a `/api/internal/ { return 404; }` block in front of
+# /api/ as defense-in-depth. Traefik's plain IngressRoute has no trivial
+# equivalent (no "return 404" primitive without pointing at a real
+# service), and it isn't load-bearing: /internal/tfstate authenticates
+# every request with a per-task Basic-auth token on its own, by design
+# (see backend/app/routers/internal_tfstate.py's docstring — "the token
+# check stands on its own either way"). So /api/internal/* is simply
+# proxied through like the rest of /api/ here; the worker reaches it
+# directly over the cluster network anyway (networkpolicy.yaml
+# allow-to-backend), this route only matters for an external caller, and
+# an external caller still needs a valid task token to get anything back.
+#
 #   /realms/, /resources/, /admin/, /js/  -> keycloak:8080  (must precede /)
 #   /api/                                  -> backend:8000   (prefix stripped)
 #   /                                       -> frontend:8080  (SPA catch-all)
 {{- if .Values.ingress.enabled }}
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-api-prefix
+  namespace: {{ .Values.global.namespace }}
+spec:
+  stripPrefix:
+    prefixes:
+      - /api
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
 metadata:
   name: appstore
   namespace: {{ .Values.global.namespace }}
-  annotations:
-    {{- if .Values.ingress.tls.enabled }}
-    cert-manager.io/cluster-issuer: letsencrypt-dns
-    {{- end }}
-    # Backend's /api prefix-strip, equivalent to nginx's `rewrite ^/api/(.*) /$1 break`.
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
-    nginx.ingress.kubernetes.io/proxy-body-size: 50m
-    # Ingress has no "null backend" primitive for the /api/internal/ block
-    # rule nginx.conf uses (`return 404;`) — a configuration-snippet is the
-    # direct equivalent on an nginx-ingress controller. Requires
-    # `allow-snippet-annotations: "true"` in the controller's ConfigMap
-    # (default-disabled on recent ingress-nginx for CVE-2021-25742 —
-    # confirm it's enabled, or this annotation is silently dropped and
-    # /api/internal/ falls through to the backend rule below).
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      location ~ ^/api/internal/ {
-        return 404;
-      }
 spec:
-  ingressClassName: {{ .Values.ingress.className }}
-  {{- if .Values.ingress.tls.enabled }}
-  tls:
-    - hosts:
-        - {{ .Values.ingress.host }}
-      secretName: {{ .Values.ingress.tls.secretName }}
-  {{- end }}
-  rules:
-    - host: {{ .Values.ingress.host }}
-      http:
-        paths:
-          - path: /api(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: backend
-                port:
-                  number: {{ .Values.backend.port }}
-          - path: /realms(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: keycloak
-                port:
-                  number: 8080
-          - path: /resources(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: keycloak
-                port:
-                  number: 8080
-          - path: /admin(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: keycloak
-                port:
-                  number: 8080
-          - path: /js(/|$)(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: keycloak
-                port:
-                  number: 8080
-          - path: /()(.*)
-            pathType: ImplementationSpecific
-            backend:
-              service:
-                name: frontend
-                port:
-                  number: {{ .Values.frontend.port }}
+  entryPoints:
+    - websecure
+  tls: {}
+  routes:
+    - match: Host(`{{ .Values.ingress.host }}`) && PathPrefix(`/api`)
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: strip-api-prefix
+      services:
+        - name: backend
+          port: {{ .Values.backend.port }}
+    - match: Host(`{{ .Values.ingress.host }}`) && (PathPrefix(`/realms`) || PathPrefix(`/resources`) || PathPrefix(`/admin`) || PathPrefix(`/js`))
+      kind: Rule
+      priority: 50
+      services:
+        - name: keycloak
+          port: 8080
+    - match: Host(`{{ .Values.ingress.host }}`)
+      kind: Rule
+      priority: 1
+      services:
+        - name: frontend
+          port: {{ .Values.frontend.port }}
 {{- end }}

@@ -4,9 +4,8 @@
 # from the ArgoCD Application's `helm.valueFiles`.
 #
 # Mirrors deployment/docker-compose.staging.yml service-for-service. Secret
-# values (passwords, keys, tokens) never live here — see templates/secrets.yaml,
-# which declares ExternalSecret resources that pull real values from an
-# external store at sync time.
+# values (passwords, keys, tokens) never live here — see templates/secrets.yaml
+# for how appstore-core-secrets / appstore-frontend-secrets are created.
 
 global:
   imageRegistry: ghcr.io/nextappstore
@@ -15,13 +14,12 @@ global:
   # directly for cross-resource DNS (e.g. DATABASE_URL host).
   namespace: appstore-staging
 
+# Cluster runs Traefik with ExternalDNS + a wildcard cert for
+# *.cluster.<student-id>.users.dhbw.site — any IngressRoute host under
+# that zone gets DNS + HTTPS automatically. See templates/ingress.yaml.
 ingress:
   enabled: true
-  className: nginx
   host: ""
-  tls:
-    enabled: true
-    secretName: appstore-tls
 
 backend:
   image:

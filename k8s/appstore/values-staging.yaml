@@ -11,20 +11,28 @@
 # ${WORKER_VERSION:-latest}/${FRONTEND_VERSION:-latest} defaults pull).
 # k8s-deploy.yml only rebuilds backend (to bake in deployment/seed/ — see
 # that workflow's header comment), so it only ever bumps backend's tag.
+#
+# ingress.host is deliberately NOT appstore.<domain> — that hostname is
+# already served by the existing Ansible/docker-compose deployment on its
+# own VM. Using it here too would be a DNS collision between the two
+# parallel deployments, not a shared/working setup. appstore-staging
+# lives under the cluster's own auto-provisioned zone instead (DNS +
+# wildcard HTTPS cert handled automatically by ExternalDNS — see
+# templates/ingress.yaml).
 
 global:
   namespace: appstore-staging
 
 ingress:
-  host: appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site # TODO: replace with real staging hostname
+  host: appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site
 
 backend:
   image:
     tag: latest
   env:
-    corsOrigins: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
-    appBaseUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
-    apiBaseUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
+    corsOrigins: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    appBaseUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    apiBaseUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
 
 worker:
   image:
@@ -34,6 +42,6 @@ frontend:
   image:
     tag: latest
   env:
-    appUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
-    apiUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
-    keycloakUrl: "https://appstore.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    appUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    apiUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
+    keycloakUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
