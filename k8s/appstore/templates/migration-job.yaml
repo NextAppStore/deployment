@@ -41,6 +41,15 @@ spec:
   backoffLimit: 2
   ttlSecondsAfterFinished: 300
   template:
+    metadata:
+      # Matches allow-to-postgres' podSelector (networkpolicy.yaml) —
+      # without this label the pod has none at all, so default-deny-
+      # ingress blocks it from reaching postgres:5432 at the network
+      # layer (confirmed: "Connection refused" from alembic, not a
+      # credentials error — that's what a NetworkPolicy drop looks like
+      # here, not Postgres actually refusing).
+      labels:
+        {{- include "appstore.selectorLabels" "backend" | nindent 8 }}
     spec:
       restartPolicy: Never
       containers:
@@ -86,6 +95,10 @@ spec:
   backoffLimit: 2
   ttlSecondsAfterFinished: 300
   template:
+    metadata:
+      # See appstore-migrate above — matches allow-to-postgres' podSelector.
+      labels:
+        {{- include "appstore.selectorLabels" "backend" | nindent 8 }}
     spec:
       restartPolicy: Never
       containers:

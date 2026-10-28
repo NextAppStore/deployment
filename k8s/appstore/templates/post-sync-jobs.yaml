@@ -67,6 +67,12 @@ metadata:
 spec:
   backoffLimit: 2
   template:
+    metadata:
+      # Matches allow-to-postgres' podSelector (networkpolicy.yaml) — this
+      # Job connects to postgres:5432, same reason as appstore-migrate /
+      # appstore-worker-db-role in migration-job.yaml.
+      labels:
+        {{- include "appstore.selectorLabels" "backend" | nindent 8 }}
     spec:
       restartPolicy: Never
       containers:
