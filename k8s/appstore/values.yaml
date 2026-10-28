@@ -87,6 +87,13 @@ frontend:
     tag: latest
   replicas: 1
   port: 8080
+  nginxConfig:
+    # Mount files/frontend-nginx.conf over the image's baked-in
+    # /etc/nginx/conf.d/default.conf (see templates/frontend.yaml).
+    # Decouples nginx config fixes from a frontend image rebuild; the
+    # image keeps its own copy, so docker-compose is unaffected either
+    # way. Set to false to use whatever the image ships instead.
+    enabled: true
   resources:
     requests:
       cpu: 250m
