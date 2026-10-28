@@ -30,7 +30,11 @@ backend:
   image:
     tag: latest
   env:
-    corsOrigins: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    # CORS_ORIGINS must be a JSON array string — backend/app/config.py
+    # types it as list[str], and pydantic_settings json.loads()'s the raw
+    # env var. A plain string here crashes the backend at startup
+    # (SettingsError: error parsing value for field "CORS_ORIGINS").
+    corsOrigins: '["https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"]'
     appBaseUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
     apiBaseUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
 
