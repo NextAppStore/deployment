@@ -29,20 +29,16 @@ spec:
       containers:
         - name: backend
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
-          command:
-            - python
-            - -m
-            - uvicorn
-            - app.main:app
-            - --host
-            - "0.0.0.0"
-            - --port
-            - {{ .Values.backend.port | quote }}
-            - --workers
-            - {{ .Values.backend.env.workers | default .Values.backend.workers | quote }}
-            - --proxy-headers
-            - --forwarded-allow-ips
-            - "*"
+          # No `command:` override here on purpose. The image's own entry
+          # point (`python -m app.server`, see backend/app/server.py) exists
+          # precisely to open a dual-stack listening socket: with HOST=::
+          # it binds AF_INET6 with dualstack_ipv6=True, so one socket serves
+          # both families in every worker mode. Spelling out
+          # `uvicorn --host 0.0.0.0` instead bypassed that and bound IPv4
+          # only — on this IPv6-primary cluster the kubelet probes
+          # http://[fd00:42::x]:8000/health, got ECONNREFUSED, and restarted
+          # a healthy backend in a loop. Behaviour is driven by the HOST /
+          # PORT / WORKERS / FORWARDED_ALLOW_IPS env vars below.
           env:
             # $(VAR) substitution in a Kubernetes env value only resolves
             # a var declared EARLIER in this same list — DB_USER/
@@ -116,12 +112,21 @@ spec:
               value: {{ .Values.backend.env.debug | quote }}
             - name: APP_NAME
               value: {{ .Values.backend.env.appName | quote }}
+            # "::" (not 0.0.0.0) — app/server.py turns this into a
+            # dual-stack socket, which is what makes the kubelet's IPv6
+            # probe reachable. Also still serves IPv4 (dualstack_ipv6),
+            # so the image HEALTHCHECK against 127.0.0.1 keeps working.
             - name: HOST
-              value: "0.0.0.0"
+              value: "::"
             - name: PORT
               value: {{ .Values.backend.port | quote }}
             - name: WORKERS
-              value: {{ .Values.backend.workers | quote }}
+              value: {{ .Values.backend.env.workers | default .Values.backend.workers | quote }}
+            # Replaces the `--forwarded-allow-ips "*"` that the removed
+            # command: override used to pass; the pod sits behind the
+            # ingress controller, so X-Forwarded-* must be trusted.
+            - name: FORWARDED_ALLOW_IPS
+              value: "*"
             - name: LOG_LEVEL
               value: {{ .Values.backend.env.logLevel | quote }}
           ports:
