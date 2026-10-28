@@ -48,6 +48,15 @@ spec:
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
           command: ["python", "-m", "alembic", "upgrade", "head"]
           env:
+            # alembic/env.py imports app.config.settings — the full
+            # Settings model, not a migration-specific subset — so every
+            # field with no default must be set here too, not just the
+            # DB connection vars. Settings' only required fields besides
+            # DATABASE_URL are CREDENTIAL_ENCRYPTION_KEY (confirmed via
+            # the migration Job's own crash: pydantic ValidationError,
+            # "CREDENTIAL_ENCRYPTION_KEY: Field required"). Everything
+            # else in Settings has a default.
+            #
             # $(VAR) only resolves a var declared EARLIER in this list.
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
@@ -57,6 +66,8 @@ spec:
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
             - name: DATABASE_URL
               value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
 ---
 # The migration above creates the worker's database role (appstore_worker)
 # with its column grants but no password; this Job sets that password
@@ -82,6 +93,10 @@ spec:
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
           command: ["python", "scripts/worker_db_role.py"]
           env:
+            # Same import chain as the migration Job above (worker_db_role.py
+            # does `from app.config import settings`) — needs
+            # CREDENTIAL_ENCRYPTION_KEY for the same reason.
+            #
             # $(VAR) only resolves a var declared EARLIER in this list.
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
@@ -91,6 +106,8 @@ spec:
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
             - name: DATABASE_URL
               value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
             - name: WORKER_DB_PASSWORD
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: WORKER_DB_PASSWORD } }
 {{- end }}

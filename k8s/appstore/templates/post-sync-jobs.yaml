@@ -74,6 +74,11 @@ spec:
           image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
           command: ["python", "/app/seed/seed_data.py"]
           env:
+            # seed_data.py imports app.database, which imports
+            # app.config.settings (the full Settings model) — needs
+            # CREDENTIAL_ENCRYPTION_KEY for the same reason the
+            # migration Job does (see migration-job.yaml).
+            #
             # $(VAR) only resolves a var declared EARLIER in this list.
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
@@ -83,6 +88,8 @@ spec:
               valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
             - name: DATABASE_URL
               value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
             - name: KEYCLOAK_SERVER_URL
               value: {{ .Values.backend.env.keycloakServerUrl | quote }}
             - name: KEYCLOAK_REALM
