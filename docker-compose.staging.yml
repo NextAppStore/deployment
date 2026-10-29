@@ -289,6 +289,11 @@ services:
       - worker_rescued_state:/var/lib/appstore-worker/rescued-state
     networks:
       - worker-network
+      # Dedicated IPv6-egress network (NAT66) so lab actions (reset,
+      # reassign, add/remove student) can reach a Kubernetes-App team's
+      # cluster, which is IPv6-only on this OpenStack network — mirrors
+      # why backend is also on this network for Moodle's IPv6-only LTI.
+      - lti-egress-network
     restart: unless-stopped
     # On SIGTERM the worker claims nothing new and lets running jobs
     # finish (an apply or Packer build can take many minutes). A job

@@ -205,6 +205,11 @@ services:
       # The worker reaches /internal/tfstate (OpenTofu's state backend)
       # over this network.
       - worker-network
+      # Dedicated IPv6-egress network (NAT66) so LTI platforms (e.g.
+      # Moodle, IPv6-only) and a Kubernetes-App team's cluster (also
+      # IPv6-only) are reachable without enabling IPv6 on backend-network,
+      # which nginx/frontend/keycloak also share.
+      - lti-egress-network
     restart: unless-stopped
 
   # ----------------------------------------------------------------
@@ -259,6 +264,10 @@ services:
       - ssh_keys:/root/.ssh:ro
     networks:
       - worker-network
+      # Dedicated IPv6-egress network (NAT66) so lab actions (reset,
+      # reassign, add/remove student) can reach a Kubernetes-App team's
+      # cluster, which is IPv6-only on this OpenStack network.
+      - lti-egress-network
     restart: unless-stopped
 
   # ----------------------------------------------------------------
@@ -348,3 +357,15 @@ networks:
   keycloak-network:
     driver: bridge
     name: keycloak-network-dev
+  # Requires docker_daemon_options (ipv6/fixed-cidr-v6/ip6tables) on the
+  # Docker host for NAT66 masquerading — see
+  # infrastructure/ansible/staging.yml and docker-compose.staging.yml's
+  # lti-egress-network for the matching production config. Subnet is
+  # explicit and disjoint from the daemon's default fixed-cidr-v6 pool.
+  lti-egress-network:
+    driver: bridge
+    name: lti-egress-network-dev
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "fd00:dead:dev::/64"
