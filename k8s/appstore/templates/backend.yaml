@@ -1,0 +1,165 @@
+# Backend API (FastAPI). Mirrors the `backend` service in
+# docker-compose.staging.yml. DB migrations are NOT run here — see
+# migration-job.yaml, same separation-of-concerns reasoning as the
+# dedicated Ansible task it replaces.
+#
+# sync-wave "3": must start strictly after migration-job.yaml's two Jobs
+# (waves 1-2) — backend's background reaper (task_finalizer.py) crashes
+# the whole process if the `tasks` table doesn't exist yet, so the
+# schema has to land before this pod's first boot, not just "eventually."
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "backend" | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "backend" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "backend" | nindent 8 }}
+    spec:
+      containers:
+        - name: backend
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.backend.image.repository "tag" .Values.backend.image.tag) }}
+          # No `command:` override here on purpose. The image's own entry
+          # point (`python -m app.server`, see backend/app/server.py) exists
+          # precisely to open a dual-stack listening socket: with HOST=::
+          # it binds AF_INET6 with dualstack_ipv6=True, so one socket serves
+          # both families in every worker mode. Spelling out
+          # `uvicorn --host 0.0.0.0` instead bypassed that and bound IPv4
+          # only — on this IPv6-primary cluster the kubelet probes
+          # http://[fd00:42::x]:8000/health, got ECONNREFUSED, and restarted
+          # a healthy backend in a loop. Behaviour is driven by the HOST /
+          # PORT / WORKERS / FORWARDED_ALLOW_IPS env vars below.
+          env:
+            # $(VAR) substitution in a Kubernetes env value only resolves
+            # a var declared EARLIER in this same list — DB_USER/
+            # DB_PASSWORD/DB_NAME must come before DATABASE_URL, or the
+            # literal text "$(DB_NAME)" etc. is passed through unexpanded.
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_PASSWORD } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: DB_NAME } }
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)"
+            - name: SECRET_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SECRET_KEY } }
+            - name: ALGORITHM
+              value: {{ .Values.backend.env.algorithm | quote }}
+            - name: ACCESS_TOKEN_EXPIRE_MINUTES
+              value: {{ .Values.backend.env.accessTokenExpireMinutes | quote }}
+            - name: CREDENTIAL_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: CREDENTIAL_ENCRYPTION_KEY } }
+            # Password of the worker's database role (appstore_worker); the
+            # migration Job creates the role, scripts/worker_db_role.py
+            # (run as its own PostSync step, see migration-job.yaml) sets
+            # its password from this same value.
+            - name: WORKER_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: WORKER_DB_PASSWORD } }
+            - name: KEYCLOAK_SERVER_URL
+              value: {{ .Values.backend.env.keycloakServerUrl | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ .Values.backend.env.keycloakRealm | quote }}
+            - name: KEYCLOAK_CLIENT_ID
+              value: {{ .Values.backend.env.keycloakClientId | quote }}
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: KEYCLOAK_CLIENT_SECRET } }
+            - name: KEYCLOAK_ENABLED
+              value: {{ .Values.backend.env.keycloakEnabled | quote }}
+            - name: GIT_ACCESS_TOKEN
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: GIT_ACCESS_TOKEN } }
+            - name: CORS_ORIGINS
+              value: {{ .Values.backend.env.corsOrigins | quote }}
+            - name: SMTP_ENABLED
+              value: {{ .Values.backend.env.smtpEnabled | quote }}
+            - name: SMTP_HOST
+              value: {{ .Values.backend.env.smtpHost | quote }}
+            - name: SMTP_PORT
+              value: {{ .Values.backend.env.smtpPort | quote }}
+            - name: SMTP_USER
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SMTP_USER } }
+            - name: SMTP_PASSWORD
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SMTP_PASSWORD } }
+            - name: SMTP_FROM_EMAIL
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: SMTP_FROM_EMAIL } }
+            - name: SMTP_FROM_NAME
+              value: {{ .Values.backend.env.smtpFromName | quote }}
+            - name: APP_BASE_URL
+              value: {{ .Values.backend.env.appBaseUrl | quote }}
+            - name: LTI_PLATFORM_ISSUER
+              value: {{ .Values.backend.env.ltiPlatformIssuer | quote }}
+            - name: LTI_PLATFORM_JWKS_URL
+              value: {{ .Values.backend.env.ltiPlatformJwksUrl | quote }}
+            - name: LTI_CLIENT_ID
+              value: {{ .Values.backend.env.ltiClientId | quote }}
+            - name: LTI_DEPLOYMENT_ID
+              value: {{ .Values.backend.env.ltiDeploymentId | quote }}
+            - name: LTI_SESSION_SECRET
+              valueFrom: { secretKeyRef: { name: appstore-core-secrets, key: LTI_SESSION_SECRET } }
+            - name: API_BASE_URL
+              value: {{ .Values.backend.env.apiBaseUrl | quote }}
+            - name: DEBUG
+              value: {{ .Values.backend.env.debug | quote }}
+            - name: APP_NAME
+              value: {{ .Values.backend.env.appName | quote }}
+            # "::" (not 0.0.0.0) — app/server.py turns this into a
+            # dual-stack socket, which is what makes the kubelet's IPv6
+            # probe reachable. Also still serves IPv4 (dualstack_ipv6),
+            # so the image HEALTHCHECK against 127.0.0.1 keeps working.
+            - name: HOST
+              value: "::"
+            - name: PORT
+              value: {{ .Values.backend.port | quote }}
+            - name: WORKERS
+              value: {{ .Values.backend.env.workers | default .Values.backend.workers | quote }}
+            # Replaces the `--forwarded-allow-ips "*"` that the removed
+            # command: override used to pass; the pod sits behind the
+            # ingress controller, so X-Forwarded-* must be trusted.
+            - name: FORWARDED_ALLOW_IPS
+              value: "*"
+            - name: LOG_LEVEL
+              value: {{ .Values.backend.env.logLevel | quote }}
+          ports:
+            - containerPort: {{ .Values.backend.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.backend.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            - name: git-repos
+              mountPath: /tmp/repos
+      volumes:
+        - name: git-repos
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "backend" | nindent 4 }}
+  ports:
+    - port: {{ .Values.backend.port }}
+      targetPort: {{ .Values.backend.port }}

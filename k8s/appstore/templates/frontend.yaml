@@ -1,0 +1,122 @@
+# Frontend (Vue 3 SPA, served by nginx inside the image). Mirrors the
+# `frontend` service in docker-compose.staging.yml.
+#
+# sync-wave "3": no DB dependency of its own, but kept in the same wave
+# as backend/worker (see migration-job.yaml for the wave plan) for
+# simplicity — there's no harm in it waiting slightly longer than
+# strictly necessary.
+{{- if .Values.frontend.nginxConfig.enabled }}
+# SPA nginx config mounted over the image's /etc/nginx/conf.d/default.conf.
+#
+# Why this exists: the image bakes in frontend/nginx.conf, so a config fix
+# otherwise needs a full frontend image rebuild + push before the cluster
+# can pick it up. Mounting it here decouples the two — both paths stay
+# functional and use the same config:
+#
+#   docker-compose / local  -> image's own baked-in frontend/nginx.conf
+#   Kubernetes (this chart) -> config/frontend-nginx.conf via this ConfigMap
+#
+# Both copies must be kept in sync by hand (see the header comment in
+# config/frontend-nginx.conf for why they cannot share one file). Set
+# frontend.nginxConfig.enabled=false to fall back to the image's copy
+# once it is known to carry the dual-stack listen directive.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-nginx
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+data:
+  default.conf: |
+{{ .Files.Get "config/frontend-nginx.conf" | indent 4 }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "appstore.selectorLabels" "frontend" | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "appstore.selectorLabels" "frontend" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "appstore.selectorLabels" "frontend" | nindent 8 }}
+      {{- if .Values.frontend.nginxConfig.enabled }}
+      annotations:
+        # Rolls the pods when the nginx config changes — a ConfigMap edit
+        # alone would otherwise leave running pods on the old config until
+        # something unrelated happened to restart them.
+        checksum/nginx-config: {{ .Files.Get "config/frontend-nginx.conf" | sha256sum }}
+      {{- end }}
+    spec:
+      containers:
+        - name: frontend
+          image: {{ include "appstore.image" (dict "registry" $.Values.global.imageRegistry "repository" .Values.frontend.image.repository "tag" .Values.frontend.image.tag) }}
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: VITE_KEYCLOAK_URL
+              value: {{ .Values.frontend.env.keycloakUrl | quote }}
+            - name: VITE_KEYCLOAK_REALM
+              value: {{ .Values.frontend.env.keycloakRealm | quote }}
+            - name: VITE_KEYCLOAK_CLIENT_ID
+              value: {{ .Values.frontend.env.keycloakClientId | quote }}
+            - name: VITE_APP_URL
+              value: {{ .Values.frontend.env.appUrl | quote }}
+            - name: VITE_API_URL
+              value: {{ .Values.frontend.env.apiUrl | quote }}
+            # Optional accent colour (#RRGGBB). Empty = ScholarStack red.
+            - name: VITE_ACCENT_COLOR
+              value: {{ .Values.frontend.env.accentColor | quote }}
+          ports:
+            - containerPort: {{ .Values.frontend.port }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.frontend.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.frontend.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          {{- if .Values.frontend.nginxConfig.enabled }}
+          volumeMounts:
+            # subPath so only default.conf is replaced — mounting the whole
+            # directory would hide the rest of /etc/nginx/conf.d.
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+              readOnly: true
+          {{- end }}
+      {{- if .Values.frontend.nginxConfig.enabled }}
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: frontend-nginx
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    {{- include "appstore.selectorLabels" "frontend" | nindent 4 }}
+  ports:
+    - port: {{ .Values.frontend.port }}
+      targetPort: {{ .Values.frontend.port }}

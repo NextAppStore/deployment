@@ -3,3 +3,9 @@
 .secrets
 .DS_Store
 __pycache__/
+
+# Populated by the k8s-deploy.yml CI workflow from keycloak/realm-export.json.j2
+# right before `helm template`/packaging — never hand-edit or commit. A plain
+# local checkout won't have this directory; run the equivalent cp+sed from
+# k8s-deploy.yml yourself if you need to test the chart locally.
+k8s/appstore/files/

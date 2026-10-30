@@ -1,0 +1,51 @@
+# Staging overrides. Applied on top of values.yaml.
+#
+# backend.image.tag is bumped by deployment/.github/workflows/k8s-deploy.yml
+# after each backend build — it edits that one field via `yq` and commits,
+# which is what triggers ArgoCD's sync. Do not hand-edit it on the staging
+# branch outside that workflow unless deliberately pinning a rollback.
+#
+# worker.image.tag / frontend.image.tag stay on `latest` deliberately —
+# worker/ci.yml and frontend/ci.yml already keep `latest` current on
+# every push to their own main (same images docker-compose.staging.yml's
+# ${WORKER_VERSION:-latest}/${FRONTEND_VERSION:-latest} defaults pull).
+# k8s-deploy.yml only rebuilds backend (to bake in deployment/seed/ — see
+# that workflow's header comment), so it only ever bumps backend's tag.
+#
+# ingress.host is deliberately NOT appstore.<domain> — that hostname is
+# already served by the existing Ansible/docker-compose deployment on its
+# own VM. Using it here too would be a DNS collision between the two
+# parallel deployments, not a shared/working setup. appstore-staging
+# lives under the cluster's own auto-provisioned zone instead (DNS +
+# wildcard HTTPS cert handled automatically by ExternalDNS — see
+# templates/ingress.yaml).
+
+global:
+  namespace: appstore-staging
+
+ingress:
+  host: appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site
+
+backend:
+  image:
+    tag: latest
+  env:
+    # CORS_ORIGINS must be a JSON array string — backend/app/config.py
+    # types it as list[str], and pydantic_settings json.loads()'s the raw
+    # env var. A plain string here crashes the backend at startup
+    # (SettingsError: error parsing value for field "CORS_ORIGINS").
+    corsOrigins: '["https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"]'
+    appBaseUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    apiBaseUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
+
+worker:
+  image:
+    tag: latest
+
+frontend:
+  image:
+    tag: latest
+  env:
+    appUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"
+    apiUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site/api"
+    keycloakUrl: "https://appstore-staging.cluster.s242808-at-student-dhbw-mannheim-de.users.dhbw.site"

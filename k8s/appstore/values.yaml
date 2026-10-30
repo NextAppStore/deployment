@@ -1,0 +1,148 @@
+# Defaults shared by every environment. Environment-specific overrides
+# (image tags, hostnames, replica counts) live in values-<env>.yaml and are
+# passed to `helm template`/`helm upgrade` as a second -f file, or referenced
+# from the ArgoCD Application's `helm.valueFiles`.
+#
+# Mirrors deployment/docker-compose.staging.yml service-for-service. Secret
+# values (passwords, keys, tokens) never live here — see templates/secrets.yaml
+# for how appstore-core-secrets / appstore-frontend-secrets are created.
+
+global:
+  imageRegistry: ghcr.io/nextappstore
+  # Namespace all resources are deployed into. ArgoCD Applications normally
+  # set destination.namespace instead, but resources reference this value
+  # directly for cross-resource DNS (e.g. DATABASE_URL host).
+  namespace: appstore-staging
+
+# Cluster runs Traefik with ExternalDNS + a wildcard cert for
+# *.cluster.<student-id>.users.dhbw.site — any IngressRoute host under
+# that zone gets DNS + HTTPS automatically. See templates/ingress.yaml.
+ingress:
+  enabled: true
+  host: ""
+
+backend:
+  image:
+    repository: backend
+    tag: latest
+  replicas: 1
+  port: 8000
+  workers: 4
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  env:
+    algorithm: HS256
+    accessTokenExpireMinutes: 30
+    keycloakServerUrl: http://keycloak:8080
+    keycloakRealm: dhbw
+    keycloakClientId: appstore-backend
+    keycloakEnabled: true
+    corsOrigins: ""
+    smtpEnabled: false
+    smtpHost: smtp.gmail.com
+    smtpPort: 465
+    smtpFromName: "Click-n-Deploy"
+    appBaseUrl: ""
+    apiBaseUrl: ""
+    ltiPlatformIssuer: ""
+    ltiPlatformJwksUrl: ""
+    ltiClientId: ""
+    ltiDeploymentId: ""
+    debug: false
+    appName: "Backend API"
+    logLevel: info
+
+worker:
+  image:
+    repository: worker
+    tag: latest
+  replicas: 1
+  concurrency: 4
+  # On SIGTERM the worker claims nothing new and lets running jobs finish
+  # (an apply or Packer build can take many minutes) — mirrors compose's
+  # stop_grace_period: 30m. A job killed anyway is failed by the backend
+  # once its lease runs out; nothing is retried automatically.
+  terminationGracePeriodSeconds: 1800
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  rescuedState:
+    storage: 5Gi
+  env:
+    debug: false
+    logLevel: info
+
+frontend:
+  image:
+    repository: frontend
+    tag: latest
+  replicas: 1
+  port: 8080
+  nginxConfig:
+    # Mount files/frontend-nginx.conf over the image's baked-in
+    # /etc/nginx/conf.d/default.conf (see templates/frontend.yaml).
+    # Decouples nginx config fixes from a frontend image rebuild; the
+    # image keeps its own copy, so docker-compose is unaffected either
+    # way. Set to false to use whatever the image ships instead.
+    enabled: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  env:
+    keycloakRealm: dhbw
+    keycloakClientId: appstore-frontend
+    appUrl: ""
+    apiUrl: ""
+    keycloakUrl: ""
+    # Optional accent colour (#RRGGBB). Empty = ScholarStack red.
+    accentColor: ""
+
+postgres:
+  image: postgres:16-alpine
+  storage: 10Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+keycloak:
+  image: quay.io/keycloak/keycloak:23.0
+  adminUser: admin
+  realm: dhbw
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  postgres:
+    image: postgres:16-alpine
+    storage: 5Gi
+
+migration:
+  # Runs `python -m alembic upgrade head` as an ArgoCD PostSync hook,
+  # mirroring the dedicated Ansible task kept outside docker-compose so
+  # migration failures surface directly instead of being buried in
+  # container-start logs.
+  enabled: true
+
+# appstore-core-secrets / appstore-frontend-secrets are created by hand
+# via kubectl, not by this chart — see templates/secrets.yaml for the
+# exact commands and why.

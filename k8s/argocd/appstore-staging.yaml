@@ -1,0 +1,55 @@
+# Registers the Helm chart in ../appstore with the ArgoCD instance already
+# running on the target cluster. Apply this once against that cluster's
+# ArgoCD namespace (kubectl apply -f, or via the ArgoCD CLI/UI) — it does
+# not provision ArgoCD itself, the cluster, the Ingress controller,
+# cert-manager, or External Secrets Operator; those are assumed to already
+# exist (see k8s/appstore/values.yaml comments for what the chart expects
+# to find: ingressClassName nginx, ClusterIssuer letsencrypt-dns,
+# ClusterSecretStore appstore-secret-store).
+#
+# source.targetRevision tracks `main` — k8s-deploy.yml commits image-tag
+# bumps straight to main, so ArgoCD's sync target is always "whatever CI
+# last pushed", same promotion model as staging.yml's push-to-main trigger.
+#
+# syncPolicy.automated reconciles on every poll/webhook without a manual
+# "Sync" click; selfHeal reverts any manual kubectl drift back to what's
+# in Git; prune removes resources that were deleted from the chart. All
+# three are what you want for a staging environment that should always
+# mirror Git — reconsider selfHeal/prune for a prod Application later if
+# manual hotfixes-then-backport becomes a real workflow.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: appstore-staging
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/NextAppStore/deployment.git
+    targetRevision: main
+    path: k8s/appstore
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-staging.yaml
+  destination:
+    # Assumes in-cluster ArgoCD (the common case); change `server` to the
+    # target cluster's API server URL (as registered via `argocd cluster
+    # add`) if ArgoCD manages this app on a different cluster than the one
+    # it runs in.
+    server: https://kubernetes.default.svc
+    namespace: appstore-staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

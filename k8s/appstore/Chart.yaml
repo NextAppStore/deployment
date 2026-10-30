@@ -1,0 +1,6 @@
+apiVersion: v2
+name: appstore
+description: NextAppStore (backend, worker, frontend, Keycloak, RabbitMQ, Redis, Postgres) for ArgoCD-managed clusters
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

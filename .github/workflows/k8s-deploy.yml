@@ -1,0 +1,156 @@
+name: CD - Kubernetes (ArgoCD) Staging Deployment
+#
+# Parallel path to staging.yml (the existing Ansible/VM deploy) — this
+# workflow never touches that one. ArgoCD (already running on the target
+# cluster) picks up commits to k8s/appstore/values-staging.yaml and
+# reconciles them. No OpenTofu here: the cluster and ArgoCD itself are
+# provisioned and managed outside this repo.
+#
+# Worker and frontend images are NOT rebuilt here — worker/.github/
+# workflows/ci.yml and frontend/.github/workflows/ci.yml already build
+# and push ghcr.io/nextappstore/{worker,frontend} on every push to their
+# own main (tagged `latest`, `sha-<sha>`, and semver). This workflow just
+# references their `latest` tag, same as docker-compose.staging.yml's own
+# `${WORKER_VERSION:-latest}` default — rebuilding them here would be
+# pure duplication with no benefit (slower, no multi-arch, risks drifting
+# from what backend/frontend/worker's own CI actually produced).
+#
+# Backend IS rebuilt here, under a distinct `-k8s` tag suffix that never
+# collides with backend/ci.yml's own tags, because the backend image
+# backend/ci.yml publishes does not and cannot contain deployment/seed/ —
+# that directory lives outside the backend repo's build context entirely.
+# seed_data.py/set_keycloak_urls.py need to execute inside the backend's
+# own Python environment (SQLAlchemy, python-keycloak, the app.* models),
+# so the only way to run them from a Kubernetes Job without re-injecting
+# files via ConfigMap (the approach this chart deliberately moved away
+# from — see git history on k8s/appstore/templates/post-sync-jobs.yaml)
+# is to ship seed/ inside a backend image. backend/Dockerfile itself is
+# NOT modified: this workflow stages seed/ into a throwaway copy of the
+# build context so the existing `COPY . .` picks it up, same trick as
+# Ansible's `docker cp` for the VM path.
+#
+# keycloak/realm-export.json.j2 is copied into the chart's files/ dir
+# (with its Jinja placeholders swapped for Helm-safe sentinels) right
+# before `helm template`/packaging, since Helm's .Files.Get cannot read
+# paths outside its own chart directory — see k8s/appstore/.gitignore.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'backend/**'
+      - 'seed/**'
+      - 'keycloak/realm-export.json.j2'
+      - 'k8s/**'
+      - '.github/workflows/k8s-deploy.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: nextappstore
+
+jobs:
+  build-backend:
+    name: Build & Push Backend Image (with seed/)
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      backend_tag: ${{ steps.tag.outputs.backend_tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Determine backend image tag
+        id: tag
+        run: echo "backend_tag=sha-${GITHUB_SHA::7}-k8s" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # backend/Dockerfile and the backend repo are NOT modified — this
+      # only stages seed/ inside a copy of the build context for the
+      # duration of this CI run so the existing `COPY . .` in
+      # backend/Dockerfile picks it up.
+      - name: Stage seed/ into backend build context
+        run: cp -r seed backend/seed
+
+      - name: Build & push backend image (seed-augmented)
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/backend:${{ steps.tag.outputs.backend_tag }}
+
+      - name: Remove staged seed/ from backend build context
+        if: always()
+        run: rm -rf backend/seed
+
+  render-and-sync:
+    name: Render Chart & Push Manifest Update
+    needs: build-backend
+    runs-on: self-hosted
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      # Not committed — see k8s/appstore/.gitignore. Populated fresh every
+      # run from the single source of truth in keycloak/, then consumed by
+      # `helm template`/lint/package below in this same job.
+      - name: Render Keycloak realm-export template into the chart
+        run: |
+          set -euo pipefail
+          mkdir -p k8s/appstore/files
+          sed \
+            -e 's/{{ app_api_url }}/__APP_API_URL__/g' \
+            -e 's/{{ app_base_url }}/__APP_BASE_URL__/g' \
+            keycloak/realm-export.json.j2 > k8s/appstore/files/realm-export.json.tpl
+
+      # worker/frontend stay on `latest` (the tag their own CI keeps
+      # current on every push to their main) — only backend's tag ever
+      # changes here, since it's the only image this workflow builds.
+      - name: Bump backend image tag in values-staging.yaml
+        env:
+          BACKEND_TAG: ${{ needs.build-backend.outputs.backend_tag }}
+        run: |
+          set -euo pipefail
+          cd k8s/appstore
+          yq -i ".backend.image.tag = strenv(BACKEND_TAG)" values-staging.yaml
+
+      - name: Lint & template chart (sanity check before pushing)
+        run: |
+          cd k8s/appstore
+          helm lint . -f values-staging.yaml
+          helm template appstore . -f values-staging.yaml > /dev/null
+
+      - name: Commit & push updated values + rendered realm export
+        env:
+          BACKEND_TAG: ${{ needs.build-backend.outputs.backend_tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/appstore/values-staging.yaml
+          if git diff --cached --quiet; then
+            echo "No image tag changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(k8s): bump backend image tag to ${BACKEND_TAG}"
+          git push origin HEAD:main
+
+      # ArgoCD (already registered against this repo + k8s/appstore path,
+      # see k8s/argocd/appstore-staging.yaml) picks up the commit above via
+      # its GitHub webhook or its regular poll — no further action here.

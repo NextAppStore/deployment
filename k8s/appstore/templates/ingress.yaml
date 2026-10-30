@@ -1,0 +1,72 @@
+# Replaces the nginx reverse-proxy container + its hand-maintained TLS
+# cert provisioning (nginx/nginx.conf + the Ansible self-signed/ACME
+# logic). This cluster runs Traefik (confirmed via `kubectl get crd |
+# grep traefik` -> ingressroutes.traefik.io / middlewares.traefik.io,
+# apiVersion traefik.io/v1alpha1) with ExternalDNS + a wildcard cert for
+# *.cluster.<student>.users.dhbw.site — any Ingress/IngressRoute host
+# under that zone gets a DNS record and HTTPS automatically, no
+# cert-manager annotation or secretName needed (see values.yaml ingress.host).
+#
+# Plain networking.k8s.io/v1 Ingress annotations are nginx-specific
+# (rewrite-target, configuration-snippet) and silently no-op on Traefik,
+# so this uses Traefik's native IngressRoute + Middleware CRDs instead,
+# which support prefix-stripping and routing priority directly.
+#
+# Path routing mirrors nginx/nginx.conf, with one deliberate difference:
+# nginx.conf adds a `/api/internal/ { return 404; }` block in front of
+# /api/ as defense-in-depth. Traefik's plain IngressRoute has no trivial
+# equivalent (no "return 404" primitive without pointing at a real
+# service), and it isn't load-bearing: /internal/tfstate authenticates
+# every request with a per-task Basic-auth token on its own, by design
+# (see backend/app/routers/internal_tfstate.py's docstring — "the token
+# check stands on its own either way"). So /api/internal/* is simply
+# proxied through like the rest of /api/ here; the worker reaches it
+# directly over the cluster network anyway (networkpolicy.yaml
+# allow-to-backend), this route only matters for an external caller, and
+# an external caller still needs a valid task token to get anything back.
+#
+#   /realms/, /resources/, /admin/, /js/  -> keycloak:8080  (must precede /)
+#   /api/                                  -> backend:8000   (prefix stripped)
+#   /                                       -> frontend:8080  (SPA catch-all)
+{{- if .Values.ingress.enabled }}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: strip-api-prefix
+  namespace: {{ .Values.global.namespace }}
+spec:
+  stripPrefix:
+    prefixes:
+      - /api
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: appstore
+  namespace: {{ .Values.global.namespace }}
+spec:
+  entryPoints:
+    - websecure
+  tls: {}
+  routes:
+    - match: Host(`{{ .Values.ingress.host }}`) && PathPrefix(`/api`)
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: strip-api-prefix
+      services:
+        - name: backend
+          port: {{ .Values.backend.port }}
+    - match: Host(`{{ .Values.ingress.host }}`) && (PathPrefix(`/realms`) || PathPrefix(`/resources`) || PathPrefix(`/admin`) || PathPrefix(`/js`))
+      kind: Rule
+      priority: 50
+      services:
+        - name: keycloak
+          port: 8080
+    - match: Host(`{{ .Values.ingress.host }}`)
+      kind: Rule
+      priority: 1
+      services:
+        - name: frontend
+          port: {{ .Values.frontend.port }}
+{{- end }}
